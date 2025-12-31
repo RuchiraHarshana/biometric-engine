@@ -9,6 +9,10 @@ from app.db.models import PersonBiometric
 from app.engines.face_engine import FaceEngineONNX
 from app.schemas.biometric import EnrollResponse, MatchResponse
 from app.core.config import SIMILARITY_THRESHOLD, FACE_MODEL_PATH
+from app.api.fingerprint_routes import router_fp
+
+
+
 
 router = APIRouter()
 
@@ -141,3 +145,6 @@ async def match_face(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Match failed: {e}")
+
+# ✅ include fingerprint routes
+router.include_router(router_fp)

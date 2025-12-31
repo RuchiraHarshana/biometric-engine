@@ -10,3 +10,4 @@ SCRFD_MODEL_PATH = os.getenv("SCRFD_MODEL_PATH", "app/models/scrfd_person_2.5g.o
 SCRFD_DET_SIZE = int(os.getenv("SCRFD_DET_SIZE", "640"))
 SCRFD_THRESH = float(os.getenv("SCRFD_THRESH", "0.5"))
 SCRFD_NMS = float(os.getenv("SCRFD_NMS", "0.4"))
+FINGERPRINT_THRESHOLD = float(os.getenv("FINGERPRINT_THRESHOLD", "0.45"))
