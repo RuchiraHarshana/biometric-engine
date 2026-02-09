@@ -3,9 +3,6 @@ uvicorn[standard]
 python-multipart
 pydantic
 python-dotenv
-httpx
 numpy
 opencv-python
 onnxruntime
-sqlalchemy
-psycopg2-binary

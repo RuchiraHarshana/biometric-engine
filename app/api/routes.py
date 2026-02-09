@@ -3,6 +3,7 @@ from typing import Optional
 from pathlib import Path
 
 import numpy as np
+import httpx
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -11,13 +12,10 @@ from app.db.session import SessionLocal
 from app.db import crud
 from app.db.models import PersonBiometric
 
-from app.engines.face_engine import FaceEngineONNX
-from app.engines.fingerprint_engine import FingerprintEngine
-
 from app.schemas.biometric import EnrollResponse, MatchResponse
 from app.schemas.verify import VerifyResponse
 
-from app.core.config import SIMILARITY_THRESHOLD, FACE_MODEL_PATH, FINGERPRINT_THRESHOLD
+from app.core.config import SIMILARITY_THRESHOLD, FINGERPRINT_THRESHOLD, MODEL_SERVICE_URL, MODEL_SERVICE_TIMEOUT
 
 # ✅ Import fingerprint router
 from app.api.fingerprint_routes import router_fp
@@ -37,16 +35,17 @@ def get_db():
         db.close()
 
 
-_face_engine: Optional[FaceEngineONNX] = None
-
-def get_face_engine() -> FaceEngineONNX:
-    global _face_engine
-    if _face_engine is None:
-        _face_engine = FaceEngineONNX(FACE_MODEL_PATH)
-    return _face_engine
+async def _post_model_service(path: str, files=None, data=None) -> dict:
+    async with httpx.AsyncClient(base_url=MODEL_SERVICE_URL, timeout=MODEL_SERVICE_TIMEOUT) as client:
+        resp = await client.post(path, files=files, data=data)
+    resp.raise_for_status()
+    return resp.json()
 
 
-fp_engine = FingerprintEngine()
+async def get_face_embedding(image: UploadFile, image_bytes: bytes) -> np.ndarray:
+    files = {"image": (image.filename or "face.jpg", image_bytes, image.content_type or "application/octet-stream")}
+    payload = await _post_model_service("/face/embedding", files=files)
+    return np.array(payload["embedding"], dtype=np.float32)
 
 
 # -----------------------------
@@ -126,12 +125,8 @@ async def enroll_face(
     db: Session = Depends(get_db),
 ):
     try:
-        engine = get_face_engine()
-
         img_bytes = await image.read()
-        img = engine.read_image(img_bytes)
-
-        emb = engine.get_embedding(img)
+        emb = await get_face_embedding(image, img_bytes)
 
         # ✅ Save face image to disk for displaying later
         save_path = UPLOAD_DIR / f"{person_id}.jpg"
@@ -167,11 +162,8 @@ async def match_face(
     db: Session = Depends(get_db),
 ):
     try:
-        engine = get_face_engine()
-
         img_bytes = await image.read()
-        img = engine.read_image(img_bytes)
-        query_emb = engine.get_embedding(img)
+        query_emb = await get_face_embedding(image, img_bytes)
 
         records = crud.fetch_all_embeddings(db)
         if not records:
@@ -190,7 +182,7 @@ async def match_face(
             if not r.face_embedding:
                 continue
             db_emb = np.array(json.loads(r.face_embedding), dtype=np.float32)
-            score = engine.cosine_similarity(query_emb, db_emb)
+            score = float(np.dot(query_emb, db_emb))
             if score > best_score:
                 best_score = score
                 best = r
@@ -254,10 +246,8 @@ async def verify(
 
     # ---------- FACE ----------
     if face_image is not None:
-        engine = get_face_engine()
         face_bytes = await face_image.read()
-        img = engine.read_image(face_bytes)
-        query_emb = engine.get_embedding(img)
+        query_emb = await get_face_embedding(face_image, face_bytes)
 
         best = None
         best_score = float("-inf")
@@ -266,7 +256,7 @@ async def verify(
             if not r.face_embedding:
                 continue
             db_emb = np.array(json.loads(r.face_embedding), dtype=np.float32)
-            score = engine.cosine_similarity(query_emb, db_emb)
+            score = float(np.dot(query_emb, db_emb))
             if score > best_score:
                 best_score = score
                 best = r
@@ -280,32 +270,38 @@ async def verify(
 
     # ---------- FINGERPRINT ----------
     if fingerprint_image is not None:
-        fp_bytes = await fingerprint_image.read()
-        fp_img = fp_engine.read_image(fp_bytes)
-
-        query_tpl = fp_engine.extract_template(fp_img)
-        query_des = fp_engine.deserialize_des(query_tpl)
-
-        best = None
-        best_score = float("-inf")
+        templates = []
+        template_records = []
 
         for r in records:
             tpl_str = getattr(r, "fingerprint_template", None)
             if not tpl_str:
                 continue
-            tpl = json.loads(tpl_str)
-            db_des = fp_engine.deserialize_des(tpl)
-            score = fp_engine.match_score(query_des, db_des)
-            if score > best_score:
-                best_score = score
-                best = r
+            templates.append(json.loads(tpl_str))
+            template_records.append(r)
 
-        fp_similarity = float(best_score if best is not None else 0.0)
-        fp_matched = (best is not None) and (best_score >= FINGERPRINT_THRESHOLD)
+        if templates:
+            fp_bytes = await fingerprint_image.read()
+            files = {
+                "image": (
+                    fingerprint_image.filename or "fingerprint.jpg",
+                    fp_bytes,
+                    fingerprint_image.content_type or "application/octet-stream",
+                )
+            }
+            data = {"templates": json.dumps(templates)}
+            payload = await _post_model_service("/fingerprint/match", files=files, data=data)
 
-        if fp_matched:
-            fp_person_id = best.person_id
-            fp_full_name = best.full_name
+            best_index = payload.get("best_index")
+            best_score = float(payload.get("score", 0.0))
+
+            fp_similarity = best_score
+            fp_matched = (best_index is not None) and (best_score >= FINGERPRINT_THRESHOLD)
+
+            if fp_matched:
+                best = template_records[int(best_index)]
+                fp_person_id = best.person_id
+                fp_full_name = best.full_name
 
     face_provided = face_image is not None
     fp_provided = fingerprint_image is not None

@@ -1,14 +1,18 @@
 import json
+import httpx
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.db import crud
-from app.engines.fingerprint_engine import FingerprintEngine
-from app.core.config import FINGERPRINT_THRESHOLD
+from app.core.config import FINGERPRINT_THRESHOLD, MODEL_SERVICE_URL, MODEL_SERVICE_TIMEOUT
 
 router_fp = APIRouter()
-fp_engine = FingerprintEngine()
+async def _post_model_service(path: str, files=None, data=None) -> dict:
+    async with httpx.AsyncClient(base_url=MODEL_SERVICE_URL, timeout=MODEL_SERVICE_TIMEOUT) as client:
+        resp = await client.post(path, files=files, data=data)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def get_db():
@@ -35,8 +39,15 @@ async def enroll_fingerprint(
 ):
     try:
         img_bytes = await image.read()
-        img = fp_engine.read_image(img_bytes)
-        template = fp_engine.extract_template(img)
+        files = {
+            "image": (
+                image.filename or "fingerprint.jpg",
+                img_bytes,
+                image.content_type or "application/octet-stream",
+            )
+        }
+        payload = await _post_model_service("/fingerprint/template", files=files)
+        template = payload["template"]
 
         rec = crud.upsert_fingerprint_template(
             db=db,
@@ -67,34 +78,47 @@ async def match_fingerprint(
     db: Session = Depends(get_db),
 ):
     try:
-        img_bytes = await image.read()
-        img = fp_engine.read_image(img_bytes)
-        query_tpl = fp_engine.extract_template(img)
-        query_des = fp_engine.deserialize_des(query_tpl)
-
         records = crud.fetch_all_embeddings(db)
-
-        best = None
-        best_score = -1.0
+        templates = []
+        template_records = []
 
         for r in records:
             if not getattr(r, "fingerprint_template", None):
                 continue
-            tpl = json.loads(r.fingerprint_template)
-            db_des = fp_engine.deserialize_des(tpl)
-            score = fp_engine.match_score(query_des, db_des)
+            templates.append(json.loads(r.fingerprint_template))
+            template_records.append(r)
 
-            if score > best_score:
-                best_score = score
-                best = r
+        if not templates:
+            return {
+                "matched": False,
+                "person_id": None,
+                "full_name": None,
+                "similarity": 0.0,
+                "threshold": float(FINGERPRINT_THRESHOLD),
+            }
 
-        matched = (best is not None) and (best_score >= FINGERPRINT_THRESHOLD)
+        img_bytes = await image.read()
+        files = {
+            "image": (
+                image.filename or "fingerprint.jpg",
+                img_bytes,
+                image.content_type or "application/octet-stream",
+            )
+        }
+        data = {"templates": json.dumps(templates)}
+        payload = await _post_model_service("/fingerprint/match", files=files, data=data)
+
+        best_index = payload.get("best_index")
+        best_score = float(payload.get("score", 0.0))
+
+        matched = (best_index is not None) and (best_score >= FINGERPRINT_THRESHOLD)
+        best = template_records[int(best_index)] if matched else None
 
         return {
             "matched": matched,
             "person_id": best.person_id if matched else None,
             "full_name": best.full_name if matched else None,
-            "similarity": float(best_score if best is not None else 0.0),
+            "similarity": float(best_score if matched else 0.0),
             "threshold": float(FINGERPRINT_THRESHOLD),
         }
 
