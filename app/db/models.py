@@ -8,16 +8,22 @@ class PersonBiometric(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # business identifier (what you use in API)
+    # Required basics
     person_id = Column(String(64), unique=True, index=True, nullable=False)
-
     full_name = Column(String(255), nullable=True)
 
-    # store face embedding as JSON string (can be NULL if only fingerprint enrolled)
-    face_embedding = Column(Text, nullable=True)
+    # Optional profile fields (NULL allowed)
+    email = Column(String(255), nullable=True)
+    mobile_number = Column(String(50), nullable=True)
+    address = Column(Text, nullable=True)
+    criminal_records = Column(Text, nullable=True)
 
-    # store fingerprint template as JSON string (can be NULL if only face enrolled)
-    fingerprint_template = Column(Text, nullable=True)
+    # Biometrics (optional)
+    face_embedding = Column(Text, nullable=True)          # JSON string
+    fingerprint_template = Column(Text, nullable=True)    # JSON string
+
+    # Face display (store file path)
+    face_image_path = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
