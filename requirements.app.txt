@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
-python-dotenv
-httpx
-numpy
-sqlalchemy
-psycopg2-binary

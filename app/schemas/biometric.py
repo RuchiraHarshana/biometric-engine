@@ -11,3 +11,11 @@ class MatchResponse(BaseModel):
     full_name: str | None
     similarity: float
     threshold: float
+
+
+class PersonUpdate(BaseModel):
+    full_name: str | None = None
+    email: str | None = None
+    mobile_number: str | None = None
+    address: str | None = None
+    criminal_records: str | None = None

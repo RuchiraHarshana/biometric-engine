@@ -1,11 +1,22 @@
+# ── Core framework ──
 fastapi
 uvicorn[standard]
 python-multipart
 pydantic
 python-dotenv
-httpx
-numpy
-opencv-python
-onnxruntime
+
+# ── Database ──
 sqlalchemy
 psycopg2-binary
+supabase-py==1.0.3
+
+# ── Auth ──
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt==4.0.1
+pyotp
+
+
+onnxruntime
+
+httpx

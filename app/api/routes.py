@@ -1,38 +1,29 @@
 import json
 from typing import Optional
-from pathlib import Path
 
 import numpy as np
 import httpx
+import os
+import random
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
-from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from fastapi.responses import RedirectResponse
 
-from app.db.session import SessionLocal
-from app.db import crud
-from app.db.models import PersonBiometric
+from app.storage.supabase_storage import upload_face_image, delete_face_image
+from app.storage.supabase_client import client as sb
+from app.auth import supabase_service
 
 from app.schemas.biometric import EnrollResponse, MatchResponse
+from app.schemas.biometric import PersonUpdate
 from app.schemas.verify import VerifyResponse
 
 from app.core.config import SIMILARITY_THRESHOLD, FINGERPRINT_THRESHOLD, MODEL_SERVICE_URL, MODEL_SERVICE_TIMEOUT
+from app.auth.dependencies import require_admin, require_register_access, require_verify_access, require_officer
 
 # ✅ Import fingerprint router
 from app.api.fingerprint_routes import router_fp
 
 
 router = APIRouter()
-
-UPLOAD_DIR = Path("app/uploads/faces")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 async def _post_model_service(path: str, files=None, data=None) -> dict:
@@ -42,6 +33,7 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
     return resp.json()
 
 
+# MOCK: Replace get_face_embedding with a dummy embedding for testing
 async def get_face_embedding(image: UploadFile, image_bytes: bytes) -> np.ndarray:
     files = {"image": (image.filename or "face.jpg", image_bytes, image.content_type or "application/octet-stream")}
     payload = await _post_model_service("/face/embedding", files=files)
@@ -52,59 +44,112 @@ async def get_face_embedding(image: UploadFile, image_bytes: bytes) -> np.ndarra
 # Admin endpoints
 # -----------------------------
 @router.get("/persons", tags=["Admin"])
-def list_persons(db: Session = Depends(get_db)):
-    records = db.query(PersonBiometric).all()
-    return [
-        {
-            "person_id": r.person_id,
-            "full_name": r.full_name,
-
-            "email": r.email,
-            "mobile_number": r.mobile_number,
-            "address": r.address,
-            "criminal_records": r.criminal_records,
-
-            "has_face": bool(r.face_embedding),
-            "has_fingerprint": bool(getattr(r, "fingerprint_template", None)),
-
-            "face_image_path": r.face_image_path,
-            "face_image_url": f"/api/persons/{r.person_id}/face-image" if r.face_image_path else None,
-        }
-        for r in records
-    ]
+async def list_persons(_admin=Depends(require_admin)):
+    persons = await sb.get("persons")
+    out = []
+    for p in persons:
+        person_id = p.get("person_id")
+        has_face = bool((await sb.get("face_embeddings", filters={"person_id": person_id})))
+        has_fp = bool((await sb.get("fingerprint_templates", filters={"person_id": person_id})))
+        out.append(
+            {
+                "person_id": person_id,
+                "full_name": p.get("full_name"),
+                "email": p.get("email"),
+                "mobile_number": p.get("mobile_number"),
+                "address": p.get("address"),
+                "criminal_records": p.get("criminal_records"),
+                "has_face": has_face,
+                "has_fingerprint": has_fp,
+                "face_image_key": p.get("face_image_key"),
+                "face_image_url": p.get("face_image_url"),
+            }
+        )
+    return out
 
 
 @router.get("/persons/{person_id}/face-image", tags=["Admin"])
-def get_face_image(person_id: str, db: Session = Depends(get_db)):
-    rec = db.query(PersonBiometric).filter(PersonBiometric.person_id == person_id).first()
-    if not rec or not rec.face_image_path:
+async def get_face_image(person_id: str, _admin=Depends(require_admin)):
+    recs = await sb.get("persons", filters={"person_id": person_id})
+    if not recs or not recs[0].get("face_image_url"):
         raise HTTPException(status_code=404, detail="Face image not found")
-
-    path = Path(rec.face_image_path)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Face image file missing on disk")
-
-    return FileResponse(path)
+    return RedirectResponse(recs[0].get("face_image_url"))
 
 
 @router.delete("/persons/{person_id}", tags=["Admin"])
-def delete_person(person_id: str, db: Session = Depends(get_db)):
-    rec = db.query(PersonBiometric).filter(PersonBiometric.person_id == person_id).first()
-    if not rec:
+async def delete_person(person_id: str, _admin=Depends(require_admin)):
+    recs = await sb.get("persons", filters={"person_id": person_id})
+    if not recs:
         raise HTTPException(status_code=404, detail="Person not found")
+    rec = recs[0]
 
-    # delete face file if exists
-    if rec.face_image_path:
+    if rec.get("face_image_key"):
         try:
-            p = Path(rec.face_image_path)
-            if p.exists():
-                p.unlink()
+            await delete_face_image(rec.get("face_image_key"))
         except Exception:
             pass
 
-    db.delete(rec)
-    db.commit()
+    # delete dependent records first
+    await sb.delete("face_embeddings", {"person_id": person_id})
+    await sb.delete("fingerprint_templates", {"person_id": person_id})
+    await sb.delete("persons", {"person_id": person_id})
     return {"deleted": True, "person_id": person_id}
+
+
+@router.patch("/persons/{person_id}", tags=["Admin"])
+async def update_person(person_id: str, body: PersonUpdate, user=Depends(require_officer)):
+    """Partial update for person records.
+
+    - Officers may update basic fields.
+    - Only admins may modify `criminal_records`.
+    Changes are recorded to `person_audits` for auditing.
+    """
+    recs = await sb.get("persons", filters={"person_id": person_id})
+    if not recs:
+        raise HTTPException(status_code=404, detail="Person not found")
+
+    # enforce field-level permission
+    if body.criminal_records is not None and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins may modify criminal records")
+
+    # build update payload from provided fields
+    update_payload = {}
+    if body.full_name is not None:
+        update_payload["full_name"] = body.full_name
+    if body.email is not None:
+        update_payload["email"] = body.email
+    if body.mobile_number is not None:
+        update_payload["mobile_number"] = body.mobile_number
+    if body.address is not None:
+        update_payload["address"] = body.address
+    if body.criminal_records is not None:
+        update_payload["criminal_records"] = body.criminal_records
+
+    if not update_payload:
+        return {"updated": False, "detail": "No fields to update"}
+
+    # perform update in Supabase
+    await sb.update("persons", {"person_id": person_id}, update_payload)
+
+    # record audit (best-effort; requires `person_audits` table to exist)
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+
+        audit_payload = {
+            "person_id": person_id,
+            "changed_by": user.get("id"),
+            "changed_at": _dt.utcnow().isoformat() + "Z",
+            "changes": _json.dumps(update_payload),
+        }
+        await sb.insert("person_audits", audit_payload)
+    except Exception:
+        # don't fail the update if audit recording is not available
+        pass
+
+    # return updated record
+    updated = await sb.get("persons", filters={"person_id": person_id})
+    return {"updated": True, "person": updated[0] if updated else None}
 
 
 # -----------------------------
@@ -122,80 +167,84 @@ async def enroll_face(
     criminal_records: str = Form(None),
 
     image: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    _user=Depends(require_register_access),
 ):
     try:
         img_bytes = await image.read()
         emb = await get_face_embedding(image, img_bytes)
 
-        # ✅ Save face image to disk for displaying later
-        save_path = UPLOAD_DIR / f"{person_id}.jpg"
-        save_path.write_bytes(img_bytes)
-
-        rec = crud.upsert_face_embedding(
-            db=db,
+        face_key, face_url = await upload_face_image(
             person_id=person_id,
-            full_name=full_name,
-            embedding_list=emb.tolist(),
-            email=email,
-            mobile_number=mobile_number,
-            address=address,
-            criminal_records=criminal_records,
-            face_image_path=str(save_path),
+            image_bytes=img_bytes,
+            content_type=image.content_type,
         )
 
-        return EnrollResponse(
-            person_id=rec.person_id,
-            full_name=rec.full_name or "",
-            message="Face enrolled successfully",
-        )
+        # upsert person
+        persons = await sb.get("persons", filters={"person_id": person_id})
+        person_payload = {
+            "person_id": person_id,
+            "full_name": full_name or None,
+            "email": email,
+            "mobile_number": mobile_number,
+            "address": address,
+            "criminal_records": criminal_records,
+            "face_image_key": face_key,
+            "face_image_url": face_url,
+        }
+        if persons:
+            await sb.update("persons", {"person_id": person_id}, person_payload)
+        else:
+            await sb.insert("persons", person_payload)
+
+        # upsert face embedding
+        emb_payload = {"person_id": person_id, "embedding": emb.tolist()}
+        existing = await sb.get("face_embeddings", filters={"person_id": person_id})
+        if existing:
+            await sb.update("face_embeddings", {"person_id": person_id}, emb_payload)
+        else:
+            await sb.insert("face_embeddings", emb_payload)
+
+        return EnrollResponse(person_id=person_id, full_name=full_name or "", message="Face enrolled successfully")
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        print("ENROLL ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=f"Enroll failed: {e}")
 
 
 @router.post("/match/face", response_model=MatchResponse, tags=["Face"])
-async def match_face(
-    image: UploadFile = File(...),
-    db: Session = Depends(get_db),
-):
+async def match_face(image: UploadFile = File(...), _user=Depends(require_verify_access)):
     try:
         img_bytes = await image.read()
         query_emb = await get_face_embedding(image, img_bytes)
 
-        records = crud.fetch_all_embeddings(db)
-        if not records:
-            return MatchResponse(
-                matched=False,
-                person_id=None,
-                full_name=None,
-                similarity=0.0,
-                threshold=float(SIMILARITY_THRESHOLD),
-            )
+        # fetch all embeddings
+        embeddings = await sb.get("face_embeddings")
+        if not embeddings:
+            return MatchResponse(matched=False, person_id=None, full_name=None, similarity=0.0, threshold=float(SIMILARITY_THRESHOLD))
 
         best = None
         best_score = float("-inf")
+        # build persons map
+        persons = await sb.get("persons")
+        pmap = {p.get("person_id"): p for p in persons}
 
-        for r in records:
-            if not r.face_embedding:
+        for r in embeddings:
+            emb_list = r.get("embedding")
+            if not emb_list:
                 continue
-            db_emb = np.array(json.loads(r.face_embedding), dtype=np.float32)
+            db_emb = np.array(emb_list, dtype=np.float32)
             score = float(np.dot(query_emb, db_emb))
             if score > best_score:
                 best_score = score
                 best = r
 
         matched = (best is not None) and (best_score >= SIMILARITY_THRESHOLD)
+        person_id = best.get("person_id") if matched else None
+        full_name = pmap.get(person_id, {}).get("full_name") if person_id else None
 
-        return MatchResponse(
-            matched=matched,
-            person_id=best.person_id if matched else None,
-            full_name=best.full_name if matched else None,
-            similarity=float(best_score if best is not None else 0.0),
-            threshold=float(SIMILARITY_THRESHOLD),
-        )
+        return MatchResponse(matched=matched, person_id=person_id, full_name=full_name, similarity=float(best_score if best is not None else 0.0), threshold=float(SIMILARITY_THRESHOLD))
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -210,13 +259,16 @@ async def match_face(
 async def verify(
     face_image: Optional[UploadFile] = File(None),
     fingerprint_image: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db),
+    _user=Depends(require_verify_access),
 ):
     if face_image is None and fingerprint_image is None:
         raise HTTPException(status_code=400, detail="Provide at least face_image or fingerprint_image")
 
-    records = crud.fetch_all_embeddings(db)
-    if not records:
+    embeddings = await sb.get("face_embeddings")
+    persons = await sb.get("persons")
+    pmap = {p.get("person_id"): p for p in persons}
+
+    if not embeddings:
         return VerifyResponse(
             face_provided=face_image is not None,
             fingerprint_provided=fingerprint_image is not None,
@@ -248,14 +300,14 @@ async def verify(
     if face_image is not None:
         face_bytes = await face_image.read()
         query_emb = await get_face_embedding(face_image, face_bytes)
-
         best = None
         best_score = float("-inf")
 
-        for r in records:
-            if not r.face_embedding:
+        for r in embeddings:
+            emb_list = r.get("embedding")
+            if not emb_list:
                 continue
-            db_emb = np.array(json.loads(r.face_embedding), dtype=np.float32)
+            db_emb = np.array(emb_list, dtype=np.float32)
             score = float(np.dot(query_emb, db_emb))
             if score > best_score:
                 best_score = score
@@ -265,19 +317,21 @@ async def verify(
         face_matched = (best is not None) and (best_score >= SIMILARITY_THRESHOLD)
 
         if face_matched:
-            face_person_id = best.person_id
-            face_full_name = best.full_name
+            face_person_id = best.get("person_id")
+            face_full_name = pmap.get(face_person_id, {}).get("full_name")
 
     # ---------- FINGERPRINT ----------
     if fingerprint_image is not None:
         templates = []
         template_records = []
 
-        for r in records:
-            tpl_str = getattr(r, "fingerprint_template", None)
-            if not tpl_str:
+        for r in embeddings:
+            # fetch fingerprint template for person
+            tpl_rows = await sb.get("fingerprint_templates", filters={"person_id": r.get("person_id")})
+            tpl_obj = tpl_rows[0].get("template") if tpl_rows else None
+            if not tpl_obj:
                 continue
-            templates.append(json.loads(tpl_str))
+            templates.append(tpl_obj)
             template_records.append(r)
 
         if templates:
@@ -300,8 +354,8 @@ async def verify(
 
             if fp_matched:
                 best = template_records[int(best_index)]
-                fp_person_id = best.person_id
-                fp_full_name = best.full_name
+                fp_person_id = best.get("person_id")
+                fp_full_name = pmap.get(fp_person_id, {}).get("full_name")
 
     face_provided = face_image is not None
     fp_provided = fingerprint_image is not None
