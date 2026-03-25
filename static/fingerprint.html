@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BioSecureGate – Fingerprint Capture</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    .container { max-width: 900px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; color: #38bdf8; }
+    h2 { font-size: 1.1rem; margin-bottom: 12px; color: #94a3b8; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; }
+    .tab { padding: 10px 16px; border: 1px solid #334155; border-radius: 8px 8px 0 0; cursor: pointer; background: #1e293b; color: #94a3b8; font-size: 0.9rem; transition: all 0.2s; }
+    .tab:hover { background: #334155; }
+    .tab.active { background: #0ea5e9; color: #fff; border-color: #0ea5e9; }
+
+    /* Panels */
+    .panel { display: none; background: #1e293b; border-radius: 0 8px 8px 8px; padding: 24px; border: 1px solid #334155; }
+    .panel.active { display: block; }
+
+    /* Form */
+    label { display: block; margin-bottom: 4px; color: #94a3b8; font-size: 0.85rem; }
+    input[type="text"], input[type="email"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #e2e8f0; margin-bottom: 12px; font-size: 0.9rem; }
+    textarea { width: 100%; padding: 10px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #e2e8f0; margin-bottom: 12px; font-size: 0.9rem; min-height: 60px; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    /* Buttons */
+    .btn { padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; font-weight: 600; transition: all 0.2s; }
+    .btn-primary { background: #0ea5e9; color: #fff; }
+    .btn-primary:hover { background: #0284c7; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-secondary:hover { background: #475569; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Status */
+    .status { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.85rem; }
+    .status-info { background: #1e3a5f; border: 1px solid #2563eb; color: #93c5fd; }
+    .status-success { background: #14532d; border: 1px solid #16a34a; color: #86efac; }
+    .status-error { background: #450a0a; border: 1px solid #dc2626; color: #fca5a5; }
+    .status-warning { background: #451a03; border: 1px solid #d97706; color: #fcd34d; }
+
+    /* Preview */
+    .preview-area { text-align: center; margin: 16px 0; }
+    .preview-area img { max-width: 300px; max-height: 300px; border: 2px solid #334155; border-radius: 8px; }
+    video { max-width: 100%; border-radius: 8px; border: 2px solid #334155; }
+    canvas { display: none; }
+
+    /* Scanner indicator */
+    .scanner-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 0.8rem; margin-bottom: 12px; }
+    .scanner-indicator .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .scanner-online { background: #14532d; color: #86efac; }
+    .scanner-online .dot { background: #22c55e; }
+    .scanner-offline { background: #450a0a; color: #fca5a5; }
+    .scanner-offline .dot { background: #ef4444; }
+
+    /* Mode toggle */
+    .mode-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
+    .mode-btn { padding: 8px 16px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #94a3b8; cursor: pointer; font-size: 0.85rem; }
+    .mode-btn.active { background: #0ea5e9; color: #fff; border-color: #0ea5e9; }
+
+    @media (max-width: 600px) {
+      .form-row { grid-template-columns: 1fr; }
+      .tabs { flex-direction: column; }
+      .tab { border-radius: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔐 BioSecureGate – Fingerprint Capture</h1>
+    <h2>Register or match criminal fingerprints</h2>
+
+    <!-- Mode: Enroll vs Match -->
+    <div class="mode-toggle">
+      <button class="mode-btn active" onclick="setMode('enroll')" id="mode-enroll">📝 Register</button>
+      <button class="mode-btn" onclick="setMode('match')" id="mode-match">🔍 Match / Search</button>
+    </div>
+
+    <!-- Capture method tabs -->
+    <div class="tabs">
+      <div class="tab active" data-tab="upload" onclick="switchTab('upload')">📁 Image Upload</div>
+      <div class="tab" data-tab="usb" onclick="switchTab('usb')">🔌 USB / Portable Scanner</div>
+      <div class="tab" data-tab="laptop" onclick="switchTab('laptop')">💻 Laptop Scanner</div>
+    </div>
+
+    <!-- ═══ Panel 1: Image Upload ═══ -->
+    <div class="panel active" id="panel-upload">
+      <div id="enroll-fields-upload">
+        <div class="form-row">
+          <div><label>Person ID *</label><input type="text" id="up-person-id" placeholder="e.g. CRM-001" /></div>
+          <div><label>Full Name</label><input type="text" id="up-full-name" placeholder="Full name" /></div>
+        </div>
+        <div class="form-row">
+          <div><label>Email</label><input type="email" id="up-email" placeholder="Email" /></div>
+          <div><label>Mobile</label><input type="text" id="up-mobile" placeholder="Mobile number" /></div>
+        </div>
+        <label>Address</label><textarea id="up-address" placeholder="Address"></textarea>
+        <label>Criminal Records</label><textarea id="up-criminal" placeholder="Criminal records info"></textarea>
+      </div>
+      <label>Fingerprint Image</label>
+      <input type="file" id="up-file" accept="image/*" onchange="previewFile('up-file','up-preview')" />
+      <div class="preview-area"><img id="up-preview" style="display:none" /></div>
+      <button class="btn btn-primary" onclick="submitUpload()" id="up-submit">Submit</button>
+    </div>
+
+    <!-- ═══ Panel 2: USB Scanner ═══ -->
+    <div class="panel" id="panel-usb">
+      <div id="usb-scanner-status" class="scanner-indicator scanner-offline">
+        <span class="dot"></span> <span id="usb-status-text">Checking scanner agent...</span>
+      </div>
+      <div id="enroll-fields-usb">
+        <div class="form-row">
+          <div><label>Person ID *</label><input type="text" id="usb-person-id" placeholder="e.g. CRM-001" /></div>
+          <div><label>Full Name</label><input type="text" id="usb-full-name" placeholder="Full name" /></div>
+        </div>
+        <div class="form-row">
+          <div><label>Email</label><input type="email" id="usb-email" placeholder="Email" /></div>
+          <div><label>Mobile</label><input type="text" id="usb-mobile" placeholder="Mobile number" /></div>
+        </div>
+        <label>Address</label><textarea id="usb-address" placeholder="Address"></textarea>
+        <label>Criminal Records</label><textarea id="usb-criminal" placeholder="Criminal records info"></textarea>
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:12px">
+        <button class="btn btn-primary" onclick="scanUSB()" id="usb-scan-btn">🔍 Scan Fingerprint</button>
+        <button class="btn btn-secondary" onclick="cancelScan()" id="usb-cancel-btn" style="display:none">Cancel</button>
+      </div>
+      <div id="usb-msg" class="status status-info" style="display:none"></div>
+      <div class="preview-area"><img id="usb-preview" style="display:none" /></div>
+      <button class="btn btn-primary" onclick="submitScanner('usb')" id="usb-submit" style="display:none">Submit</button>
+    </div>
+
+    <!-- ═══ Panel 3: Laptop Scanner ═══ -->
+    <div class="panel" id="panel-laptop">
+      <div id="laptop-scanner-status" class="scanner-indicator scanner-offline">
+        <span class="dot"></span> <span id="laptop-status-text">Checking scanner agent...</span>
+      </div>
+      <div id="enroll-fields-laptop">
+        <div class="form-row">
+          <div><label>Person ID *</label><input type="text" id="laptop-person-id" placeholder="e.g. CRM-001" /></div>
+          <div><label>Full Name</label><input type="text" id="laptop-full-name" placeholder="Full name" /></div>
+        </div>
+        <div class="form-row">
+          <div><label>Email</label><input type="email" id="laptop-email" placeholder="Email" /></div>
+          <div><label>Mobile</label><input type="text" id="laptop-mobile" placeholder="Mobile number" /></div>
+        </div>
+        <label>Address</label><textarea id="laptop-address" placeholder="Address"></textarea>
+        <label>Criminal Records</label><textarea id="laptop-criminal" placeholder="Criminal records info"></textarea>
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:12px">
+        <button class="btn btn-primary" onclick="scanLaptop()" id="laptop-scan-btn">🔍 Scan Fingerprint</button>
+        <button class="btn btn-secondary" onclick="cancelScan()" id="laptop-cancel-btn" style="display:none">Cancel</button>
+      </div>
+      <div id="laptop-msg" class="status status-info" style="display:none"></div>
+      <div class="preview-area"><img id="laptop-preview" style="display:none" /></div>
+      <button class="btn btn-primary" onclick="submitScanner('laptop')" id="laptop-submit" style="display:none">Submit</button>
+    </div>
+
+    <!-- Result -->
+    <div id="result" style="margin-top:20px; display:none"></div>
+  </div>
+
+  <script type="module">
+    import { ScannerClient, base64ToFile, enrollFingerprint, matchFingerprint } from './js/fingerprint-scanner.js';
+
+    // ─── Config ──────────────────────────────────────────────────
+    // Set your backend URL here (or read from env/config)
+    const API_BASE = window.API_BASE || "";
+
+    // ─── State ───────────────────────────────────────────────────
+    let currentMode = "enroll";  // "enroll" | "match"
+    let scannerClient = null;
+    let capturedImageB64 = {};   // { usb: "...", laptop: "..." }
+
+    // ─── Mode toggle ─────────────────────────────────────────────
+    window.setMode = function(mode) {
+      currentMode = mode;
+      document.getElementById("mode-enroll").classList.toggle("active", mode === "enroll");
+      document.getElementById("mode-match").classList.toggle("active", mode === "match");
+
+      // Hide/show enroll fields
+      ["upload", "usb", "laptop"].forEach(tab => {
+        const el = document.getElementById(`enroll-fields-${tab}`);
+        if (el) el.style.display = mode === "enroll" ? "block" : "none";
+      });
+    };
+
+    // ─── Tab switching ───────────────────────────────────────────
+    window.switchTab = function(tab) {
+      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+      document.querySelector(`.tab[data-tab="${tab}"]`).classList.add("active");
+      document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+      document.getElementById(`panel-${tab}`).classList.add("active");
+
+      // Check scanner agent for USB/laptop tabs
+      if (tab === "usb" || tab === "laptop") {
+        checkScannerAgent(tab);
+      }
+    };
+
+    // ─── File preview ──────────────────────────────────────────
+    window.previewFile = function(inputId, previewId) {
+      const input = document.getElementById(inputId);
+      const preview = document.getElementById(previewId);
+      if (input.files && input.files[0]) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          preview.src = e.target.result;
+          preview.style.display = "block";
+        };
+        reader.readAsDataURL(input.files[0]);
+      }
+    };
+
+    // ─── Scanner agent check ─────────────────────────────────────
+    async function checkScannerAgent(tab) {
+      const statusEl = document.getElementById(`${tab}-scanner-status`);
+      const textEl = document.getElementById(`${tab}-status-text`);
+
+      if (!scannerClient) {
+        scannerClient = new ScannerClient(
+          (msg) => {
+            // Update status text for active tab
+            const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+            if (activeTab === "usb" || activeTab === "laptop") {
+              const t = document.getElementById(`${activeTab}-status-text`);
+              if (t) t.textContent = msg;
+              const m = document.getElementById(`${activeTab}-msg`);
+              if (m) { m.textContent = msg; m.style.display = "block"; m.className = "status status-info"; }
+            }
+          },
+          (imageB64, scanner) => {
+            const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+            if (activeTab === "usb" || activeTab === "laptop") {
+              capturedImageB64[activeTab] = imageB64;
+              const preview = document.getElementById(`${activeTab}-preview`);
+              preview.src = "data:image/png;base64," + imageB64;
+              preview.style.display = "block";
+              document.getElementById(`${activeTab}-submit`).style.display = "inline-block";
+              document.getElementById(`${activeTab}-cancel-btn`).style.display = "none";
+              const m = document.getElementById(`${activeTab}-msg`);
+              m.textContent = "Fingerprint captured successfully!";
+              m.className = "status status-success";
+              m.style.display = "block";
+            }
+          },
+          (errMsg) => {
+            const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+            if (activeTab === "usb" || activeTab === "laptop") {
+              const m = document.getElementById(`${activeTab}-msg`);
+              if (m) { m.textContent = errMsg; m.className = "status status-error"; m.style.display = "block"; }
+            }
+          }
+        );
+      }
+
+      const check = await scannerClient.checkAgent();
+      if (check.available) {
+        statusEl.className = "scanner-indicator scanner-online";
+        textEl.textContent = `Scanner agent online (${check.scanner})`;
+      } else {
+        statusEl.className = "scanner-indicator scanner-offline";
+        textEl.textContent = "Scanner agent not detected – install and run the agent";
+      }
+    }
+
+    // ─── USB / Laptop scan ───────────────────────────────────────
+    window.scanUSB = async function() {
+      await doScan("usb");
+    };
+    window.scanLaptop = async function() {
+      await doScan("laptop");
+    };
+
+    async function doScan(tab) {
+      const msgEl = document.getElementById(`${tab}-msg`);
+      msgEl.textContent = "Connecting to scanner...";
+      msgEl.className = "status status-info";
+      msgEl.style.display = "block";
+      document.getElementById(`${tab}-cancel-btn`).style.display = "inline-block";
+
+      try {
+        await scannerClient.connect();
+        scannerClient.scan();
+      } catch (e) {
+        msgEl.textContent = "Failed to connect: " + e.message;
+        msgEl.className = "status status-error";
+        document.getElementById(`${tab}-cancel-btn`).style.display = "none";
+      }
+    }
+
+    window.cancelScan = function() {
+      if (scannerClient) scannerClient.cancel();
+      ["usb", "laptop"].forEach(tab => {
+        document.getElementById(`${tab}-cancel-btn`).style.display = "none";
+      });
+    };
+
+    // ─── Submit handlers ─────────────────────────────────────────
+    function getToken() {
+      // Read JWT from localStorage (set by your login page)
+      return localStorage.getItem("access_token") || "";
+    }
+
+    window.submitUpload = async function() {
+      const fileInput = document.getElementById("up-file");
+      if (!fileInput.files.length) { showResult("Select a file first", "error"); return; }
+
+      const fd = new FormData();
+      fd.append("image", fileInput.files[0]);
+      fd.append("capture_method", "image_upload");
+
+      if (currentMode === "enroll") {
+        const pid = document.getElementById("up-person-id").value.trim();
+        if (!pid) { showResult("Person ID is required", "error"); return; }
+        fd.append("person_id", pid);
+        fd.append("full_name", document.getElementById("up-full-name").value);
+        fd.append("email", document.getElementById("up-email").value);
+        fd.append("mobile_number", document.getElementById("up-mobile").value);
+        fd.append("address", document.getElementById("up-address").value);
+        fd.append("criminal_records", document.getElementById("up-criminal").value);
+        try {
+          const res = await enrollFingerprint(API_BASE, getToken(), fd);
+          showResult(`Enrolled: ${res.person_id} – ${res.full_name}`, "success");
+        } catch (e) { showResult(e.message, "error"); }
+      } else {
+        try {
+          const res = await matchFingerprint(API_BASE, getToken(), fileInput.files[0]);
+          showMatchResult(res);
+        } catch (e) { showResult(e.message, "error"); }
+      }
+    };
+
+    window.submitScanner = async function(tab) {
+      const b64 = capturedImageB64[tab];
+      if (!b64) { showResult("No fingerprint captured", "error"); return; }
+      const file = base64ToFile(b64);
+      const captureMethod = tab === "usb" ? "usb_scanner" : "laptop_scanner";
+
+      if (currentMode === "enroll") {
+        const pid = document.getElementById(`${tab}-person-id`).value.trim();
+        if (!pid) { showResult("Person ID is required", "error"); return; }
+        const fd = new FormData();
+        fd.append("image", file);
+        fd.append("capture_method", captureMethod);
+        fd.append("person_id", pid);
+        fd.append("full_name", document.getElementById(`${tab}-full-name`).value);
+        fd.append("email", document.getElementById(`${tab}-email`).value);
+        fd.append("mobile_number", document.getElementById(`${tab}-mobile`).value);
+        fd.append("address", document.getElementById(`${tab}-address`).value);
+        fd.append("criminal_records", document.getElementById(`${tab}-criminal`).value);
+        try {
+          const res = await enrollFingerprint(API_BASE, getToken(), fd);
+          showResult(`Enrolled: ${res.person_id} – ${res.full_name}`, "success");
+        } catch (e) { showResult(e.message, "error"); }
+      } else {
+        try {
+          const res = await matchFingerprint(API_BASE, getToken(), file);
+          showMatchResult(res);
+        } catch (e) { showResult(e.message, "error"); }
+      }
+    };
+
+    // ─── Display helpers ─────────────────────────────────────────
+    function showResult(msg, type) {
+      const el = document.getElementById("result");
+      el.style.display = "block";
+      el.className = `status status-${type === "success" ? "success" : "error"}`;
+      el.textContent = msg;
+      setTimeout(() => { el.style.display = "none"; }, 6000);
+    }
+
+    function showMatchResult(res) {
+      const el = document.getElementById("result");
+      el.style.display = "block";
+      if (res.matched) {
+        el.className = "status status-success";
+        el.innerHTML = `<strong>MATCH FOUND</strong><br>Person: ${res.person_id} – ${res.full_name}<br>Similarity: ${(res.similarity * 100).toFixed(1)}%`;
+      } else {
+        el.className = "status status-warning";
+        el.innerHTML = `<strong>NO MATCH</strong><br>Similarity: ${(res.similarity * 100).toFixed(1)}% (threshold: ${(res.threshold * 100).toFixed(1)}%)`;
+      }
+    }
+
+    // ─── Init ────────────────────────────────────────────────────
+    setMode("enroll");
+  </script>
+</body>
+</html>
