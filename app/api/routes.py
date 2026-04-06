@@ -26,10 +26,26 @@ from app.api.fingerprint_routes import router_fp
 router = APIRouter()
 
 
+def _sanitize_similarity(sim: float) -> float:
+    try:
+        v = float(sim)
+        return v if v >= 0.01 else 0.0
+    except Exception:
+        return 0.0
+
+
 async def _post_model_service(path: str, files=None, data=None) -> dict:
     async with httpx.AsyncClient(base_url=MODEL_SERVICE_URL, timeout=MODEL_SERVICE_TIMEOUT) as client:
         resp = await client.post(path, files=files, data=data)
-    resp.raise_for_status()
+
+    if resp.status_code >= 400:
+        try:
+            payload = resp.json()
+            detail = payload.get("detail") if isinstance(payload, dict) else resp.text
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=f"Model service error: {detail}")
+
     return resp.json()
 
 
@@ -68,8 +84,28 @@ async def list_persons(_admin=Depends(require_admin)):
     return out
 
 
-@router.get("/persons/{person_id}/face-image", tags=["Admin"])
-async def get_face_image(person_id: str, _admin=Depends(require_admin)):
+@router.get("/persons/{person_id}", tags=["Persons"])
+async def get_person(person_id: str, _user=Depends(require_officer)):
+    recs = await sb.get("persons", filters={"person_id": person_id})
+    if not recs:
+        raise HTTPException(status_code=404, detail="Person not found")
+    p = recs[0]
+    has_face = bool((await sb.get("face_embeddings", filters={"person_id": person_id})))
+    has_fp = bool((await sb.get("fingerprint_templates", filters={"person_id": person_id})))
+    return {
+        "person_id": p.get("person_id"),
+        "full_name": p.get("full_name"),
+        "email": p.get("email"),
+        "mobile_number": p.get("mobile_number"),
+        "address": p.get("address"),
+        "criminal_records": p.get("criminal_records"),
+        "has_face": has_face,
+        "has_fingerprint": has_fp,
+    }
+
+
+@router.get("/persons/{person_id}/face-image", tags=["Persons"])
+async def get_face_image(person_id: str, _user=Depends(require_officer)):
     recs = await sb.get("persons", filters={"person_id": person_id})
     if not recs or not recs[0].get("face_image_url"):
         raise HTTPException(status_code=404, detail="Face image not found")
@@ -170,17 +206,22 @@ async def enroll_face(
     _user=Depends(require_register_access),
 ):
     try:
+        print("[enroll_face] reading image bytes...")
         img_bytes = await image.read()
+        print(f"[enroll_face] got {len(img_bytes)} bytes")
         emb = await get_face_embedding(image, img_bytes)
+        print("[enroll_face] got embedding")
 
         face_key, face_url = await upload_face_image(
             person_id=person_id,
             image_bytes=img_bytes,
             content_type=image.content_type,
         )
+        print(f"[enroll_face] uploaded face image: {face_key}")
 
         # upsert person
         persons = await sb.get("persons", filters={"person_id": person_id})
+        print(f"[enroll_face] sb.get persons: {persons}")
         person_payload = {
             "person_id": person_id,
             "full_name": full_name or None,
@@ -192,24 +233,34 @@ async def enroll_face(
             "face_image_url": face_url,
         }
         if persons:
+            print("[enroll_face] updating person record")
             await sb.update("persons", {"person_id": person_id}, person_payload)
         else:
+            print("[enroll_face] inserting person record")
             await sb.insert("persons", person_payload)
 
         # upsert face embedding
         emb_payload = {"person_id": person_id, "embedding": emb.tolist()}
         existing = await sb.get("face_embeddings", filters={"person_id": person_id})
+        print(f"[enroll_face] sb.get face_embeddings: {existing}")
         if existing:
+            print("[enroll_face] updating face embedding")
             await sb.update("face_embeddings", {"person_id": person_id}, emb_payload)
         else:
+            print("[enroll_face] inserting face embedding")
             await sb.insert("face_embeddings", emb_payload)
 
+        print("[enroll_face] SUCCESS")
         return EnrollResponse(person_id=person_id, full_name=full_name or "", message="Face enrolled successfully")
 
+    except HTTPException:
+        print("[enroll_face] HTTPException raised")
+        raise
     except ValueError as e:
+        print(f"[enroll_face] ValueError: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        print("ENROLL ERROR:", repr(e))
+        print(f"[enroll_face] Exception: {e}")
         raise HTTPException(status_code=500, detail=f"Enroll failed: {e}")
 
 
@@ -243,9 +294,19 @@ async def match_face(image: UploadFile = File(...), _user=Depends(require_verify
         matched = (best is not None) and (best_score >= SIMILARITY_THRESHOLD)
         person_id = best.get("person_id") if matched else None
         full_name = pmap.get(person_id, {}).get("full_name") if person_id else None
+        criminal_records = pmap.get(person_id, {}).get("criminal_records") if person_id else None
 
-        return MatchResponse(matched=matched, person_id=person_id, full_name=full_name, similarity=float(best_score if best is not None else 0.0), threshold=float(SIMILARITY_THRESHOLD))
+        return MatchResponse(
+            matched=matched,
+            person_id=person_id,
+            full_name=full_name,
+            similarity=_sanitize_similarity(float(best_score if best is not None else 0.0)),
+            threshold=float(SIMILARITY_THRESHOLD),
+            criminal_records=criminal_records,
+        )
 
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -319,16 +380,16 @@ async def verify(
         if face_matched:
             face_person_id = best.get("person_id")
             face_full_name = pmap.get(face_person_id, {}).get("full_name")
+            face_criminal_records = pmap.get(face_person_id, {}).get("criminal_records")
 
     # ---------- FINGERPRINT ----------
     if fingerprint_image is not None:
+        # Build templates from enrolled fingerprint templates table
+        tpl_rows = await sb.get("fingerprint_templates")
         templates = []
         template_records = []
-
-        for r in embeddings:
-            # fetch fingerprint template for person
-            tpl_rows = await sb.get("fingerprint_templates", filters={"person_id": r.get("person_id")})
-            tpl_obj = tpl_rows[0].get("template") if tpl_rows else None
+        for r in tpl_rows:
+            tpl_obj = r.get("template")
             if not tpl_obj:
                 continue
             templates.append(tpl_obj)
@@ -346,23 +407,44 @@ async def verify(
             data = {"templates": json.dumps(templates)}
             payload = await _post_model_service("/fingerprint/match", files=files, data=data)
 
+            # log payload for debugging combined-verify issues
+            try:
+                import os as _os, json as _json, datetime as _dt
+                d = _os.path.join(_os.path.dirname(__file__), '..', 'logs')
+                _os.makedirs(d, exist_ok=True)
+                p = _os.path.join(d, 'combined_match_requests.log')
+                with open(p, 'a', encoding='utf-8') as fh:
+                    fh.write(_json.dumps({'ts': _dt.datetime.utcnow().isoformat() + 'Z', 'payload': payload}) + '\n')
+            except Exception:
+                pass
+
             best_index = payload.get("best_index")
             best_score = float(payload.get("score", 0.0))
 
             fp_similarity = best_score
-            fp_matched = (best_index is not None) and (best_score >= FINGERPRINT_THRESHOLD)
+            # enforce runtime minimum threshold (safety)
+            EFFECTIVE_FINGERPRINT_THRESHOLD = max(FINGERPRINT_THRESHOLD, 0.85)
+            fp_matched = (best_index is not None) and (best_score >= EFFECTIVE_FINGERPRINT_THRESHOLD)
 
             if fp_matched:
                 best = template_records[int(best_index)]
                 fp_person_id = best.get("person_id")
                 fp_full_name = pmap.get(fp_person_id, {}).get("full_name")
+                fp_criminal_records = pmap.get(fp_person_id, {}).get("criminal_records")
 
     face_provided = face_image is not None
     fp_provided = fingerprint_image is not None
 
     if face_provided and fp_provided:
-        access_granted = bool(face_matched) and bool(fp_matched)
-        decision_rule = "2FA: face AND fingerprint required"
+        # If both matched but to different persons, flag a mismatch and deny
+        if bool(face_matched) and bool(fp_matched) and face_person_id and fp_person_id and face_person_id != fp_person_id:
+            access_granted = False
+            decision_rule = "mismatch: face and fingerprint belong to different persons"
+            cross_modal_mismatch = True
+            mismatch_message = "Face and fingerprint match different enrolled persons"
+        else:
+            access_granted = bool(face_matched) and bool(fp_matched)
+            decision_rule = "2FA: face AND fingerprint required"
     elif face_provided:
         access_granted = bool(face_matched)
         decision_rule = "1FA: face only"
@@ -379,12 +461,16 @@ async def verify(
         face_full_name=face_full_name,
         face_similarity=face_similarity,
         face_threshold=float(SIMILARITY_THRESHOLD),
+        face_criminal_records=locals().get('face_criminal_records', None),
 
         fingerprint_matched=fp_matched,
         fingerprint_person_id=fp_person_id,
         fingerprint_full_name=fp_full_name,
         fingerprint_similarity=fp_similarity,
         fingerprint_threshold=float(FINGERPRINT_THRESHOLD),
+        fingerprint_criminal_records=locals().get('fp_criminal_records', None),
+        cross_modal_mismatch=locals().get('cross_modal_mismatch', False),
+        mismatch_message=locals().get('mismatch_message', None),
 
         access_granted=access_granted,
         decision_rule=decision_rule,

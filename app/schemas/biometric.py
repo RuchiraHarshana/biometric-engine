@@ -11,6 +11,7 @@ class MatchResponse(BaseModel):
     full_name: str | None
     similarity: float
     threshold: float
+    criminal_records: str | None = None
 
 
 class PersonUpdate(BaseModel):

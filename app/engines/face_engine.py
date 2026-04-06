@@ -45,13 +45,57 @@ class FaceEngineONNX:
 
     def detect_face(self, img_bgr: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        def _run_detect(img_gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)):
+            return self.detector.detectMultiScale(
+                img_gray,
+                scaleFactor=scaleFactor,
+                minNeighbors=minNeighbors,
+                minSize=minSize,
+            )
 
-        faces = self.detector.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(60, 60),
-        )
+        # Primary attempt
+        faces = _run_detect(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+
+        # Fallbacks: try histogram equalization, upscaling, and small rotations
+        if len(faces) == 0:
+            eq = cv2.equalizeHist(gray)
+            faces = _run_detect(eq, scaleFactor=1.05, minNeighbors=4, minSize=(48, 48))
+
+        if len(faces) == 0:
+            # upscale and retry
+            h, w = gray.shape[:2]
+            up = cv2.resize(gray, (0, 0), fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
+            faces_up = _run_detect(up, scaleFactor=1.05, minNeighbors=4, minSize=(40, 40))
+            if len(faces_up) > 0:
+                # map coords back to original scale
+                faces = []
+                for (x, y, ww, hh) in faces_up:
+                    faces.append((int(x / 1.5), int(y / 1.5), int(ww / 1.5), int(hh / 1.5)))
+
+        if len(faces) == 0:
+            # try small rotations
+            for angle in (-15, 15):
+                (h, w) = gray.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                rotated = cv2.warpAffine(gray, M, (w, h))
+                faces_r = _run_detect(rotated, scaleFactor=1.05, minNeighbors=4, minSize=(48, 48))
+                if len(faces_r) > 0:
+                    # map rotated bbox back approximately by inverse rotation
+                    faces = []
+                    for (x, y, ww, hh) in faces_r:
+                        # compute center of bbox
+                        cx = x + ww // 2
+                        cy = y + hh // 2
+                        # inverse rotate point
+                        M_inv = cv2.getRotationMatrix2D(center, -angle, 1.0)
+                        pts = np.array([[cx, cy]], dtype=np.float32)
+                        pts = cv2.transform(np.array([pts]), M_inv)[0]
+                        ncx, ncy = int(pts[0][0]), int(pts[0][1])
+                        nx = max(0, ncx - ww // 2)
+                        ny = max(0, ncy - hh // 2)
+                        faces.append((nx, ny, ww, hh))
+                    break
 
         if len(faces) == 0:
             raise ValueError("No face detected.")

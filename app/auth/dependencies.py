@@ -37,11 +37,18 @@ async def require_officer(user=Depends(get_current_user)):
 async def require_register_access(user=Depends(get_current_user)):
     if user.get("role") == "admin":
         return user
-    # officer access_type is stored in officers table; client code should fetch officer record when needed
+    if user.get("role") == "officer":
+        officer = await supabase_service.get_officer_by_user_id(user.get("id"))
+        if officer and officer.get("access_type") == "register_and_verify":
+            return user
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Registration access required")
 
 
 async def require_verify_access(user=Depends(get_current_user)):
     if user.get("role") == "admin":
         return user
+    if user.get("role") == "officer":
+        officer = await supabase_service.get_officer_by_user_id(user.get("id"))
+        if officer and officer.get("access_type") in ("verify_only", "register_and_verify"):
+            return user
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Verification access required")

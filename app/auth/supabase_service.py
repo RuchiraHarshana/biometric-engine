@@ -24,6 +24,11 @@ async def authenticate_user_supabase(email: str, password: str) -> Optional[Dict
     return None
 
 
+async def get_officer_by_user_id(user_id: int) -> Optional[Dict[str, Any]]:
+    rows = await sb.get("officers", filters={"user_id": user_id})
+    return rows[0] if rows else None
+
+
 async def set_totp_secret(user_id: int, secret: str) -> None:
     await sb.update("users", {"id": user_id}, {"totp_secret": secret})
 

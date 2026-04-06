@@ -53,6 +53,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     role: str
     email: str
+    access_type: Optional[str] = None
 
 
 async def _get_user_from_temp_token(creds: HTTPAuthorizationCredentials):
@@ -151,8 +152,15 @@ async def verify_2fa(
                 # mark totp_verified flag for consistency (optional)
                 if not user.get("totp_verified"):
                     await supabase_service.set_totp_verified(user.get("id"), True)
-                access_token = create_access_token({"sub": user.get("id"), "role": user.get("role"), "2fa_verified": True},)
-                return TokenResponse(access_token=access_token, role=user.get("role"), email=user.get("email"))
+                # Fetch access_type for officers
+                officer_access_type = None
+                if user.get("role") == "officer":
+                    officer = await supabase_service.get_officer_by_user_id(user.get("id"))
+                    if officer:
+                        officer_access_type = officer.get("access_type")
+                access_token = create_access_token({"sub": user.get("id"), "role": user.get("role"), "2fa_verified": True, **({
+                    "access_type": officer_access_type} if officer_access_type else {})},)
+                return TokenResponse(access_token=access_token, role=user.get("role"), email=user.get("email"), access_type=officer_access_type)
             # else: standard TOTP token path uses 'sub'
             user = await supabase_service.get_user_by_id(payload.get("sub"))
 
@@ -173,10 +181,19 @@ async def verify_2fa(
     if not user.get("totp_verified"):
         await supabase_service.set_totp_verified(user.get("id"), True)
 
-    access_token = create_access_token(
-        {"sub": user.get("id"), "role": user.get("role"), "2fa_verified": True},
-    )
-    return TokenResponse(access_token=access_token, role=user.get("role"), email=user.get("email"))
+    # Fetch access_type for officers
+    officer_access_type = None
+    if user.get("role") == "officer":
+        officer = await supabase_service.get_officer_by_user_id(user.get("id"))
+        if officer:
+            officer_access_type = officer.get("access_type")
+
+    token_data = {"sub": user.get("id"), "role": user.get("role"), "2fa_verified": True}
+    if officer_access_type:
+        token_data["access_type"] = officer_access_type
+
+    access_token = create_access_token(token_data)
+    return TokenResponse(access_token=access_token, role=user.get("role"), email=user.get("email"), access_type=officer_access_type)
 
 
 # ── Email OTP (send & verify) ──────────────────────────────
@@ -228,8 +245,19 @@ async def otp_verify(body: OtpVerifyRequest):
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    access_token = create_access_token({"sub": user.get("id"), "role": user.get("role"), "2fa_verified": True})
-    return TokenResponse(access_token=access_token, role=user.get("role"), email=user.get("email"))
+    # Fetch access_type for officers
+    officer_access_type = None
+    if user.get("role") == "officer":
+        officer = await supabase_service.get_officer_by_user_id(user.get("id"))
+        if officer:
+            officer_access_type = officer.get("access_type")
+
+    token_data = {"sub": user.get("id"), "role": user.get("role"), "2fa_verified": True}
+    if officer_access_type:
+        token_data["access_type"] = officer_access_type
+
+    access_token = create_access_token(token_data)
+    return TokenResponse(access_token=access_token, role=user.get("role"), email=user.get("email"), access_type=officer_access_type)
 
 
 # ── Who am I ────────────────────────────────────
@@ -242,5 +270,9 @@ async def me(user=Depends(get_current_user)):
         "role": user.get("role"),
         "totp_verified": user.get("totp_verified"),
     }
-    # officer details live in `officers` table; frontend can call officers endpoints if needed
+    # Include access_type for officers
+    if user.get("role") == "officer":
+        officer = await supabase_service.get_officer_by_user_id(user.get("id"))
+        if officer:
+            result["access_type"] = officer.get("access_type")
     return result
