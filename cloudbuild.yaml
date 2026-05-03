@@ -24,6 +24,8 @@ substitutions:
   _SUPABASE_URL_SECRET: "supabase-url"
   _SUPABASE_SERVICE_KEY_SECRET: "supabase-service-key"
   _JWT_SECRET_SECRET: "jwt-secret"
+  _SMTP_USER_SECRET: "smtp-user"
+  _SMTP_PASS_SECRET: "smtp-pass"
 
 steps:
   - name: "gcr.io/cloud-builders/docker"
@@ -106,8 +108,8 @@ steps:
           --memory 1Gi \
           --cpu 1 \
           --timeout 60 \
-          --set-env-vars "MODEL_SERVICE_URL=${MODEL_URL},SKIP_2FA=false,SIMILARITY_THRESHOLD=0.45,FACE_MODEL_PATH=app/models/arcface.onnx,FINGERPRINT_THRESHOLD=0.85" \
-          --set-secrets "SUPABASE_URL=${_SUPABASE_URL_SECRET}:latest,SUPABASE_SERVICE_KEY=${_SUPABASE_SERVICE_KEY_SECRET}:latest,JWT_SECRET=${_JWT_SECRET_SECRET}:latest"
+          --set-env-vars "MODEL_SERVICE_URL=${MODEL_URL},SKIP_2FA=false,SIMILARITY_THRESHOLD=0.45,FACE_MODEL_PATH=app/models/arcface.onnx,FINGERPRINT_THRESHOLD=0.85,SMTP_HOST=smtp.gmail.com,SMTP_PORT=587,SMTP_FROM=villagreeneco@gmail.com" \
+          --set-secrets "SUPABASE_URL=${_SUPABASE_URL_SECRET}:latest,SUPABASE_SERVICE_KEY=${_SUPABASE_SERVICE_KEY_SECRET}:latest,JWT_SECRET=${_JWT_SECRET_SECRET}:latest,SMTP_USER=${_SMTP_USER_SECRET}:latest,SMTP_PASS=${_SMTP_PASS_SECRET}:latest"
 
 images:
   - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_SERVICE_NAME}-${_ENV}:$SHORT_SHA"

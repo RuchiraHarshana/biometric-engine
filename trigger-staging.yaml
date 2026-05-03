@@ -1,0 +1,17 @@
+name: biometric-staging-cd
+filename: cloudbuild.yaml
+repositoryEventConfig:
+  repository: projects/biosecuregate/locations/us-central1/connections/biometric-conn/repositories/biometric-engine-repo
+  push:
+    branch: "^staging$"
+substitutions:
+  _PROJECT_ID: biosecuregate
+  _REGION: us-central1
+  _REPOSITORY_NAME: biometric-engine
+  _SERVICE_NAME: biometric-engine
+  _MODEL_SERVICE_NAME: biometric-model
+  _ENV: staging
+  _ALLOW_UNAUTH: "true"
+  _SUPABASE_URL_SECRET: supabase-url-staging
+  _SUPABASE_SERVICE_KEY_SECRET: supabase-service-key-staging
+  _JWT_SECRET_SECRET: jwt-secret-staging

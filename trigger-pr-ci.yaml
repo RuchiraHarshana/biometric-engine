@@ -1,0 +1,7 @@
+name: biometric-pr-ci
+filename: cloudbuild.ci.yaml
+repositoryEventConfig:
+  repository: projects/biosecuregate/locations/us-central1/connections/biometric-conn/repositories/biometric-engine-repo
+  pullRequest:
+    branch: ".*"
+    commentControl: COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY

@@ -1,0 +1,17 @@
+name: biometric-prod-cd
+filename: cloudbuild.yaml
+repositoryEventConfig:
+  repository: projects/biosecuregate/locations/us-central1/connections/biometric-conn/repositories/biometric-engine-repo
+  push:
+    branch: "^main$"
+substitutions:
+  _PROJECT_ID: biosecuregate
+  _REGION: us-central1
+  _REPOSITORY_NAME: biometric-engine
+  _SERVICE_NAME: biometric-engine
+  _MODEL_SERVICE_NAME: biometric-model
+  _ENV: prod
+  _ALLOW_UNAUTH: "false"
+  _SUPABASE_URL_SECRET: supabase-url-prod
+  _SUPABASE_SERVICE_KEY_SECRET: supabase-service-key-prod
+  _JWT_SECRET_SECRET: jwt-secret-prod
