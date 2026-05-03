@@ -9,8 +9,10 @@ from app.core import config
 
 class SupabaseClient:
     def __init__(self, url: str = config.SUPABASE_URL, key: str = config.SUPABASE_SERVICE_KEY):
-        self.base = url.rstrip("/") + "/rest/v1"
-        self.key = key
+        clean_url = (url or "").lstrip("\ufeff").strip()
+        clean_key = (key or "").lstrip("\ufeff").strip()
+        self.base = clean_url.rstrip("/") + "/rest/v1"
+        self.key = clean_key
         self._client: Optional[httpx.AsyncClient] = None
 
     def _headers(self) -> Dict[str, str]:
