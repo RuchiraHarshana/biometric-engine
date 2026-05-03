@@ -1,4 +1,5 @@
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8080"
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "https://biometric-engine-staging-mvmxear46a-uc.a.run.app"
 
 export const SCANNER_WS_URL = "ws://127.0.0.1:9100/ws"
 export const SCANNER_HEALTH_URL = "http://127.0.0.1:9100/health"
