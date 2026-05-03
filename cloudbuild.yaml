@@ -26,10 +26,22 @@ substitutions:
   _JWT_SECRET_SECRET: "jwt-secret"
   _SMTP_USER_SECRET: "smtp-user"
   _SMTP_PASS_SECRET: "smtp-pass"
+  _MODEL_BUCKET: "biosecuregate-models"
+  _MODEL_OBJECT: "arcface.onnx"
 
 steps:
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "fetch-model"
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        mkdir -p app/models
+        gcloud storage cp "gs://${_MODEL_BUCKET}/${_MODEL_OBJECT}" "app/models/arcface.onnx"
+
   - name: "gcr.io/cloud-builders/docker"
     id: "build-backend"
+    waitFor: ["fetch-model"]
     args:
       - build
       - -t
@@ -40,6 +52,7 @@ steps:
 
   - name: "gcr.io/cloud-builders/docker"
     id: "build-model"
+    waitFor: ["fetch-model"]
     args:
       - build
       - -t
