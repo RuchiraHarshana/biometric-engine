@@ -69,9 +69,9 @@ steps:
     args:
       - -ceu
       - |
-        AUTH_FLAG="--allow-unauthenticated"
+        auth_flag="--allow-unauthenticated"
         if [ "${_ALLOW_UNAUTH}" = "false" ]; then
-          AUTH_FLAG="--no-allow-unauthenticated"
+          auth_flag="--no-allow-unauthenticated"
         fi
 
         gcloud run deploy "${_MODEL_SERVICE_NAME}-${_ENV}" \
@@ -79,7 +79,7 @@ steps:
           --region "${_REGION}" \
           --platform managed \
           --port 8080 \
-          ${AUTH_FLAG} \
+          ${auth_flag} \
           --memory 2Gi \
           --cpu 2 \
           --timeout 60 \
@@ -92,23 +92,23 @@ steps:
     args:
       - -ceu
       - |
-        AUTH_FLAG="--allow-unauthenticated"
+        auth_flag="--allow-unauthenticated"
         if [ "${_ALLOW_UNAUTH}" = "false" ]; then
-          AUTH_FLAG="--no-allow-unauthenticated"
+          auth_flag="--no-allow-unauthenticated"
         fi
 
-        MODEL_URL="$(gcloud run services describe "${_MODEL_SERVICE_NAME}-${_ENV}" --region "${_REGION}" --format='value(status.url)')"
+        model_url="$(gcloud run services describe "${_MODEL_SERVICE_NAME}-${_ENV}" --region "${_REGION}" --format='value(status.url)')"
 
         gcloud run deploy "${_SERVICE_NAME}-${_ENV}" \
           --image "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_SERVICE_NAME}-${_ENV}:$SHORT_SHA" \
           --region "${_REGION}" \
           --platform managed \
           --port 8080 \
-          ${AUTH_FLAG} \
+          ${auth_flag} \
           --memory 1Gi \
           --cpu 1 \
           --timeout 60 \
-          --set-env-vars "MODEL_SERVICE_URL=${MODEL_URL},SKIP_2FA=false,SIMILARITY_THRESHOLD=0.45,FACE_MODEL_PATH=app/models/arcface.onnx,FINGERPRINT_THRESHOLD=0.85,SMTP_HOST=smtp.gmail.com,SMTP_PORT=587,SMTP_FROM=villagreeneco@gmail.com" \
+          --set-env-vars "MODEL_SERVICE_URL=${model_url},SKIP_2FA=false,SIMILARITY_THRESHOLD=0.45,FACE_MODEL_PATH=app/models/arcface.onnx,FINGERPRINT_THRESHOLD=0.85,SMTP_HOST=smtp.gmail.com,SMTP_PORT=587,SMTP_FROM=villagreeneco@gmail.com" \
           --set-secrets "SUPABASE_URL=${_SUPABASE_URL_SECRET}:latest,SUPABASE_SERVICE_KEY=${_SUPABASE_SERVICE_KEY_SECRET}:latest,JWT_SECRET=${_JWT_SECRET_SECRET}:latest,SMTP_USER=${_SMTP_USER_SECRET}:latest,SMTP_PASS=${_SMTP_PASS_SECRET}:latest"
 
 images:
