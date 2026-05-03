@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  model-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.model
+    container_name: biometric-model-service
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      FACE_MODEL_PATH: app/models/arcface.onnx
+    ports:
+      - "8001:8080"
+    restart: unless-stopped
+
+  app-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: biometric-app-service
+    depends_on:
+      - model-service
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      MODEL_SERVICE_URL: http://model-service:8080
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

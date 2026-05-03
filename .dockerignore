@@ -1,0 +1,90 @@
+# ── Version control ─────────────────────────────────────────────────────────
+.git
+.github
+.gitignore
+
+# ── Environment / secrets (NEVER in image) ──────────────────────────────────
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+secrets/
+credentials/
+service-account*.json
+*service_account*.json
+google-credentials.json
+firebase-adminsdk*.json
+
+# ── Python artifacts ─────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+scanner-venv/
+
+# ── Local databases ───────────────────────────────────────────────────────────
+*.db
+*.sqlite3
+biometric.db
+
+# ── Build / dist artifacts ────────────────────────────────────────────────────
+build/
+dist/
+.next/
+coverage/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Frontend build (separate project — not part of backend image) ─────────────
+bio-secure-gate-ui-build/
+**/bio-secure-gate-ui-build/
+
+# ── Node / JS ─────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE / editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── Uploaded / local data ────────────────────────────────────────────────────
+uploads/
+media/
+local_data/
+tmp/
+temp/
+
+# ── Scanner agent (Windows-only, not needed in container) ────────────────────
+scanner_agent/
+scanner-venv/
+scanner-agent.spec
+requirements.scanner.txt
+
+# ── Scripts / tests (not needed at runtime) ──────────────────────────────────
+scripts/
+tests/
+
+# ── Supabase migration files (runtime not needed) ────────────────────────────
+supabase/
+
+# ── README and docs ──────────────────────────────────────────────────────────
+README.md
+*.md
