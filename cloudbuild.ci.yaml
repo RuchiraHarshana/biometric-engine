@@ -1,0 +1,29 @@
+################################################################################
+# cloudbuild.ci.yaml — CI validation (no deploy)
+#
+# Intended trigger: pull requests to staging/main
+################################################################################
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-backend-image"
+    args:
+      - build
+      - -f
+      - Dockerfile
+      - -t
+      - "local/backend-ci:$SHORT_SHA"
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-model-image"
+    args:
+      - build
+      - -f
+      - Dockerfile.model
+      - -t
+      - "local/model-ci:$SHORT_SHA"
+      - .
+
+options:
+  logging: CLOUD_LOGGING_ONLY

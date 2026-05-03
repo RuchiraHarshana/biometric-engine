@@ -1,0 +1,118 @@
+################################################################################
+# cloudbuild.yaml — Branch-based CD for Cloud Run (app + model service)
+#
+# Use this same file for staging and production by changing substitutions in
+# your Cloud Build trigger.
+################################################################################
+
+substitutions:
+  _PROJECT_ID: "PROJECT_ID"
+  _REGION: "REGION"
+  _REPOSITORY_NAME: "REPOSITORY_NAME"
+
+  # Base service names (the pipeline appends -${_ENV})
+  _SERVICE_NAME: "biometric-engine"
+  _MODEL_SERVICE_NAME: "biometric-model"
+
+  # Environment profile: staging | prod
+  _ENV: "staging"
+
+  # Auth profile: true => public endpoint, false => private endpoint
+  _ALLOW_UNAUTH: "true"
+
+  # Secret Manager secret names (same project)
+  _SUPABASE_URL_SECRET: "supabase-url"
+  _SUPABASE_SERVICE_KEY_SECRET: "supabase-service-key"
+  _JWT_SECRET_SECRET: "jwt-secret"
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-backend"
+    args:
+      - build
+      - -t
+      - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_SERVICE_NAME}-${_ENV}:$SHORT_SHA"
+      - -f
+      - Dockerfile
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-model"
+    args:
+      - build
+      - -t
+      - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_MODEL_SERVICE_NAME}-${_ENV}:$SHORT_SHA"
+      - -f
+      - Dockerfile.model
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-backend"
+    waitFor: ["build-backend"]
+    args:
+      - push
+      - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_SERVICE_NAME}-${_ENV}:$SHORT_SHA"
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-model"
+    waitFor: ["build-model"]
+    args:
+      - push
+      - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_MODEL_SERVICE_NAME}-${_ENV}:$SHORT_SHA"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-model"
+    waitFor: ["push-model"]
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        AUTH_FLAG="--allow-unauthenticated"
+        if [ "${_ALLOW_UNAUTH}" = "false" ]; then
+          AUTH_FLAG="--no-allow-unauthenticated"
+        fi
+
+        gcloud run deploy "${_MODEL_SERVICE_NAME}-${_ENV}" \
+          --image "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_MODEL_SERVICE_NAME}-${_ENV}:$SHORT_SHA" \
+          --region "${_REGION}" \
+          --platform managed \
+          --port 8080 \
+          ${AUTH_FLAG} \
+          --memory 2Gi \
+          --cpu 2 \
+          --timeout 60 \
+          --set-env-vars "FACE_MODEL_PATH=app/models/arcface.onnx,FINGERPRINT_THRESHOLD=0.85,FINGERPRINT_FP_SCORE_THRESHOLD=0.85"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-backend"
+    waitFor: ["push-backend", "deploy-model"]
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        AUTH_FLAG="--allow-unauthenticated"
+        if [ "${_ALLOW_UNAUTH}" = "false" ]; then
+          AUTH_FLAG="--no-allow-unauthenticated"
+        fi
+
+        MODEL_URL="$(gcloud run services describe "${_MODEL_SERVICE_NAME}-${_ENV}" --region "${_REGION}" --format='value(status.url)')"
+
+        gcloud run deploy "${_SERVICE_NAME}-${_ENV}" \
+          --image "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_SERVICE_NAME}-${_ENV}:$SHORT_SHA" \
+          --region "${_REGION}" \
+          --platform managed \
+          --port 8080 \
+          ${AUTH_FLAG} \
+          --memory 1Gi \
+          --cpu 1 \
+          --timeout 60 \
+          --set-env-vars "MODEL_SERVICE_URL=${MODEL_URL},SKIP_2FA=false,SIMILARITY_THRESHOLD=0.45,FACE_MODEL_PATH=app/models/arcface.onnx,FINGERPRINT_THRESHOLD=0.85" \
+          --set-secrets "SUPABASE_URL=${_SUPABASE_URL_SECRET}:latest,SUPABASE_SERVICE_KEY=${_SUPABASE_SERVICE_KEY_SECRET}:latest,JWT_SECRET=${_JWT_SECRET_SECRET}:latest"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_SERVICE_NAME}-${_ENV}:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY_NAME}/${_MODEL_SERVICE_NAME}-${_ENV}:$SHORT_SHA"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
