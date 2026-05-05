@@ -21,6 +21,7 @@ from app.auth.dependencies import require_admin, require_register_access, requir
 
 # ✅ Import fingerprint router
 from app.api.fingerprint_routes import router_fp
+from app.api.fingerprint_v2_routes import router_fp_v2
 
 
 router = APIRouter()
@@ -479,3 +480,6 @@ async def verify(
 
 # keep existing fingerprint endpoints
 router.include_router(router_fp)
+
+# isolated experimental module (does not alter existing endpoints)
+router.include_router(router_fp_v2)

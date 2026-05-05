@@ -71,6 +71,8 @@ def home():
             "match_face": "/api/match/face",
             "enroll_fingerprint": "/api/enroll/fingerprint",
             "match_fingerprint": "/api/match/fingerprint",
+            "enroll_fingerprint_v2": "/api/experimental/enroll/fingerprint",
+            "match_fingerprint_v2": "/api/experimental/match/fingerprint",
             "verify": "/api/verify",
             "persons": "/api/persons",
         },

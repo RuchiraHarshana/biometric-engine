@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Optional
 
 import numpy as np
@@ -7,6 +8,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from app.core.config import FACE_MODEL_PATH
 from app.engines.face_engine import FaceEngineONNX
 from app.engines.fingerprint_engine import FingerprintEngine
+from app.engines.fingerprint_engine_v2 import FingerprintEngineV2
 from app.core.config import FINGERPRINT_FP_SCORE_THRESHOLD, FINGERPRINT_FP_HIGH, FINGERPRINT_FP_LOW, FINGERPRINT_REVIEW_SIMILARITY, FINGERPRINT_THRESHOLD
 
 # Enforce a minimum effective similarity so older services or clients can't accept low similarities
@@ -25,6 +27,9 @@ def get_face_engine() -> FaceEngineONNX:
 
 
 fp_engine = FingerprintEngine()
+fp_engine_v2 = FingerprintEngineV2()
+FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.32"))
+FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.25"))
 
 
 @app.get("/health")
@@ -126,3 +131,91 @@ async def fingerprint_match(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fingerprint match failed: {e}")
+
+
+@app.post("/fingerprint_v2/template")
+async def fingerprint_template_v2(image: UploadFile = File(...)):
+    try:
+        img_bytes = await image.read()
+        img = fp_engine_v2.read_image(img_bytes)
+        quality = fp_engine_v2.quality_score(img)
+        if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
+            return {
+                "error": "Fingerprint image quality too low.",
+                "quality_score": quality,
+                "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            }
+
+        template = fp_engine_v2.extract_template(img)
+        return {
+            "template": template,
+            "quality_score": quality,
+            "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "algorithm": "akaze_v2",
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fingerprint v2 template failed: {e}")
+
+
+@app.post("/fingerprint_v2/match")
+async def fingerprint_match_v2(
+    image: UploadFile = File(...),
+    templates: str = Form(...),
+):
+    try:
+        tpl_list = json.loads(templates)
+        if not isinstance(tpl_list, list) or not tpl_list:
+            return {"best_index": None, "score": 0.0, "matched": False, "tier": "no_templates"}
+
+        img_bytes = await image.read()
+        img = fp_engine_v2.read_image(img_bytes)
+        quality = fp_engine_v2.quality_score(img)
+        if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
+            return {
+                "best_index": None,
+                "score": 0.0,
+                "matched": False,
+                "tier": "reject_quality",
+                "quality_score": quality,
+                "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            }
+
+        query_tpl = fp_engine_v2.extract_template(img)
+
+        best_index = None
+        best_score = float("-inf")
+        for i, tpl in enumerate(tpl_list):
+            score = fp_engine_v2.match_score(query_tpl, tpl)
+            if score > best_score:
+                best_score = score
+                best_index = i
+
+        if best_index is None:
+            return {
+                "best_index": None,
+                "score": 0.0,
+                "matched": False,
+                "tier": "no_match",
+                "quality_score": quality,
+                "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "threshold": FINGERPRINT_V2_THRESHOLD,
+            }
+
+        matched = best_score >= FINGERPRINT_V2_THRESHOLD
+        tier = "auto" if matched else "reject_low_similarity"
+        return {
+            "best_index": int(best_index) if matched else None,
+            "score": float(best_score),
+            "matched": bool(matched),
+            "tier": tier,
+            "quality_score": quality,
+            "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "threshold": FINGERPRINT_V2_THRESHOLD,
+            "algorithm": "akaze_v2",
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fingerprint v2 match failed: {e}")
