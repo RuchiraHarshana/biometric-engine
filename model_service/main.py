@@ -3,7 +3,10 @@ import os
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Request, HTTPException
+
+
+MAX_MULTIPART_PART_SIZE = int(float(os.getenv("MAX_MULTIPART_PART_MB", "8")) * 1024 * 1024)
 
 from app.core.config import FACE_MODEL_PATH
 from app.engines.face_engine import FaceEngineONNX
@@ -32,15 +35,24 @@ FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.32"))
 FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.25"))
 
 
+async def _read_form_upload(request: Request, field: str = "image"):
+    form = await request.form(max_part_size=MAX_MULTIPART_PART_SIZE)
+    upload = form.get(field)
+    if upload is None:
+        raise HTTPException(status_code=400, detail=f"Missing '{field}' file field")
+    return upload, form
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
 @app.post("/face/embedding")
-async def face_embedding(image: UploadFile = File(...)):
+async def face_embedding(request: Request):
     try:
         engine = get_face_engine()
+        image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = engine.read_image(img_bytes)
         emb = engine.get_embedding(img)
@@ -52,8 +64,9 @@ async def face_embedding(image: UploadFile = File(...)):
 
 
 @app.post("/fingerprint/template")
-async def fingerprint_template(image: UploadFile = File(...)):
+async def fingerprint_template(request: Request):
     try:
+        image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = fp_engine.read_image(img_bytes)
         comps = fp_engine.fingerprint_score_components(img)
@@ -75,11 +88,13 @@ async def fingerprint_template(image: UploadFile = File(...)):
 
 
 @app.post("/fingerprint/match")
-async def fingerprint_match(
-    image: UploadFile = File(...),
-    templates: str = Form(...),
-):
+async def fingerprint_match(request: Request):
     try:
+        image, form = await _read_form_upload(request, "image")
+        templates = form.get("templates")
+        if not templates:
+            raise HTTPException(status_code=400, detail="Missing 'templates' form field")
+
         tpl_list = json.loads(templates)
         if not isinstance(tpl_list, list) or not tpl_list:
             return {"best_index": None, "score": 0.0}
@@ -134,8 +149,9 @@ async def fingerprint_match(
 
 
 @app.post("/fingerprint_v2/template")
-async def fingerprint_template_v2(image: UploadFile = File(...)):
+async def fingerprint_template_v2(request: Request):
     try:
+        image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
         quality = fp_engine_v2.quality_score(img)
@@ -160,11 +176,13 @@ async def fingerprint_template_v2(image: UploadFile = File(...)):
 
 
 @app.post("/fingerprint_v2/match")
-async def fingerprint_match_v2(
-    image: UploadFile = File(...),
-    templates: str = Form(...),
-):
+async def fingerprint_match_v2(request: Request):
     try:
+        image, form = await _read_form_upload(request, "image")
+        templates = form.get("templates")
+        if not templates:
+            raise HTTPException(status_code=400, detail="Missing 'templates' form field")
+
         tpl_list = json.loads(templates)
         if not isinstance(tpl_list, list) or not tpl_list:
             return {"best_index": None, "score": 0.0, "matched": False, "tier": "no_templates"}
