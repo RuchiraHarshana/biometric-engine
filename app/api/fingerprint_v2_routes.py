@@ -41,6 +41,11 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
 @router_fp_v2.post("/experimental/enroll/fingerprint", tags=["Fingerprint V2"])
 async def enroll_fingerprint_v2(
     person_id: str = Form(...),
+    full_name: str = Form(""),
+    email: str = Form(None),
+    mobile_number: str = Form(None),
+    address: str = Form(None),
+    criminal_records: str = Form(None),
     finger_label: str = Form("right_thumb"),
     capture_method: str = Form("image_upload"),
     image: UploadFile = File(...),
@@ -69,6 +74,22 @@ async def enroll_fingerprint_v2(
             )
 
         template = payload["template"]
+
+        # Keep compatibility with legacy enroll flow: ensure person exists first.
+        person_payload = {
+            "person_id": person_id,
+            "full_name": full_name or None,
+            "email": email,
+            "mobile_number": mobile_number,
+            "address": address,
+            "criminal_records": criminal_records,
+        }
+        persons = await sb.get("persons", filters={"person_id": person_id})
+        if persons:
+            await sb.update("persons", {"person_id": person_id}, person_payload)
+        else:
+            await sb.insert("persons", person_payload)
+
         row_payload = {
             "person_id": person_id,
             "finger_label": finger_label,
