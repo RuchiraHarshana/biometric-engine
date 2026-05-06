@@ -31,8 +31,9 @@ def get_face_engine() -> FaceEngineONNX:
 
 fp_engine = FingerprintEngine()
 fp_engine_v2 = FingerprintEngineV2()
-FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.32"))
+FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.55"))
 FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.25"))
+FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.65"))
 
 
 async def _read_form_upload(request: Request, field: str = "image"):
@@ -154,12 +155,27 @@ async def fingerprint_template_v2(request: Request):
         image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
+
+        # Strong fingerprint-likeness gate to reject portraits/non-fingerprint textures.
+        fp_components = fp_engine.fingerprint_score_components(img)
+        fp_score = float(fp_components.get("score", 0.0))
+        if fp_score < FINGERPRINT_V2_FP_SCORE_THRESHOLD:
+            return {
+                "error": "Image does not appear to be a fingerprint.",
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
+            }
+
         quality = fp_engine_v2.quality_score(img)
         if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
             return {
                 "error": "Fingerprint image quality too low.",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
             }
 
         template = fp_engine_v2.extract_template(img)
@@ -167,6 +183,9 @@ async def fingerprint_template_v2(request: Request):
             "template": template,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "fp_score": fp_score,
+            "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+            "fp_components": fp_components,
             "algorithm": "akaze_v2",
         }
     except ValueError as e:
@@ -189,6 +208,20 @@ async def fingerprint_match_v2(request: Request):
 
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
+
+        fp_components = fp_engine.fingerprint_score_components(img)
+        fp_score = float(fp_components.get("score", 0.0))
+        if fp_score < FINGERPRINT_V2_FP_SCORE_THRESHOLD:
+            return {
+                "best_index": None,
+                "score": 0.0,
+                "matched": False,
+                "tier": "reject_non_fingerprint",
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
+            }
+
         quality = fp_engine_v2.quality_score(img)
         if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
             return {
@@ -198,6 +231,9 @@ async def fingerprint_match_v2(request: Request):
                 "tier": "reject_quality",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
             }
 
         query_tpl = fp_engine_v2.extract_template(img)
@@ -218,6 +254,9 @@ async def fingerprint_match_v2(request: Request):
                 "tier": "no_match",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
                 "threshold": FINGERPRINT_V2_THRESHOLD,
             }
 
@@ -230,6 +269,9 @@ async def fingerprint_match_v2(request: Request):
             "tier": tier,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "fp_score": fp_score,
+            "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+            "fp_components": fp_components,
             "threshold": FINGERPRINT_V2_THRESHOLD,
             "algorithm": "akaze_v2",
         }

@@ -65,11 +65,13 @@ async def enroll_fingerprint_v2(
         if "error" in payload or "template" not in payload:
             quality = payload.get("quality_score")
             qtxt = f"{quality:.2f}" if isinstance(quality, (int, float)) else "N/A"
+            fp_score = payload.get("fp_score")
+            fptxt = f"{fp_score:.2f}" if isinstance(fp_score, (int, float)) else "N/A"
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Fingerprint V2 quality check failed. "
-                    f"quality_score={qtxt}. Please recapture a clearer image."
+                    f"Fingerprint V2 validation failed: {payload.get('error', 'invalid image')}. "
+                    f"quality_score={qtxt}, fp_score={fptxt}. Please use a clearer fingerprint image."
                 ),
             )
 
