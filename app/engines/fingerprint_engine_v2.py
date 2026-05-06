@@ -12,18 +12,45 @@ class FingerprintEngineV2:
         self.detector = cv2.AKAZE_create()
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
+    def _channel_quality(self, ch: np.ndarray) -> float:
+        edges = cv2.Canny(ch, 45, 140)
+        edge_density = float(np.sum(edges > 0)) / float(max(1, ch.shape[0] * ch.shape[1]))
+        lap_var = float(cv2.Laplacian(ch, cv2.CV_32F).var())
+        # Balance structure presence and sharpness.
+        return edge_density * min(1.0, lap_var / 300.0)
+
     def read_image(self, image_bytes: bytes) -> np.ndarray:
         arr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-        if img is None:
+        raw = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+        if raw is None:
             raise ValueError("Invalid fingerprint image.")
-        return img
+
+        # If already grayscale, keep as-is.
+        if len(raw.shape) == 2:
+            return raw
+
+        # Convert edited/recolored images to a stable monochrome signal by
+        # selecting the channel with strongest ridge-like structure.
+        if raw.shape[2] == 4:
+            bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+        else:
+            bgr = raw
+
+        b, g, r = cv2.split(bgr)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        hsv_v = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
+        lab_l = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[:, :, 0]
+
+        candidates = [gray, b, g, r, hsv_v, lab_l]
+        best = max(candidates, key=self._channel_quality)
+        return best
 
     def preprocess(self, img: np.ndarray) -> np.ndarray:
-        # Normalize lighting and improve local contrast without heavy binarization.
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        eq = clahe.apply(img)
-        den = cv2.bilateralFilter(eq, 5, 40, 40)
+        # Improve color-edit invariance by normalizing dynamic range first.
+        norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+        eq = clahe.apply(norm)
+        den = cv2.bilateralFilter(eq, 5, 45, 45)
         return den
 
     def quality_score(self, img: np.ndarray) -> float:
