@@ -6,7 +6,7 @@ import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 
 
-MAX_MULTIPART_PART_SIZE = int(float(os.getenv("MAX_MULTIPART_PART_MB", "8")) * 1024 * 1024)
+MAX_MULTIPART_PART_SIZE = int(float(os.getenv("MAX_MULTIPART_PART_MB", "32")) * 1024 * 1024)
 
 from app.core.config import FACE_MODEL_PATH
 from app.engines.face_engine import FaceEngineONNX
