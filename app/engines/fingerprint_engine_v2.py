@@ -53,6 +53,89 @@ class FingerprintEngineV2:
         den = cv2.bilateralFilter(eq, 5, 45, 45)
         return den
 
+    @staticmethod
+    def _clamp01(x: float) -> float:
+        return float(max(0.0, min(1.0, x)))
+
+    @staticmethod
+    def _range_score(x: float, lo: float, hi: float) -> float:
+        if hi <= lo:
+            return 0.0
+        return float(max(0.0, min(1.0, (x - lo) / (hi - lo))))
+
+    def fingerprint_likeness_components(self, img: np.ndarray) -> dict:
+        h, w = img.shape[:2]
+        if h == 0 or w == 0:
+            return {
+                "score": 0.0,
+                "coverage": 0.0,
+                "orientation_entropy": 0.0,
+                "kp_count": 0,
+                "kp_density": 0.0,
+                "kp_spread": 0.0,
+            }
+
+        raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+        arr = raw_norm.astype(np.float32)
+        gx = cv2.Sobel(arr, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(arr, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(gx * gx + gy * gy)
+
+        # Real fingerprints usually have ridge texture over a large fraction of the image.
+        informative = grad_mag > 12.0
+        coverage = float(np.mean(informative))
+        score_coverage = self._range_score(coverage, 0.12, 0.35)
+
+        # Fingerprints have varied local ridge directions (loops/whorls/arcs),
+        # while simple drawings often have only a few dominant directions.
+        theta = (np.arctan2(gy, gx) + np.pi) % np.pi
+        informative_theta = theta[informative]
+        if informative_theta.size >= 32:
+            hist, _ = np.histogram(informative_theta, bins=12, range=(0.0, np.pi))
+            p = hist.astype(np.float64)
+            p_sum = float(p.sum())
+            if p_sum > 0:
+                p = p / p_sum
+                p = p[p > 0]
+                entropy = float(-(p * np.log(p)).sum())
+                entropy_norm = entropy / np.log(12.0)
+            else:
+                entropy_norm = 0.0
+        else:
+            entropy_norm = 0.0
+        score_entropy = self._range_score(entropy_norm, 0.45, 0.90)
+
+        proc = self.preprocess(img)
+        kps, _ = self.detector.detectAndCompute(proc, None)
+        kp_count = int(len(kps)) if kps is not None else 0
+        kp_density = float(kp_count) / float(max(1, h * w))
+        score_density = self._range_score(kp_density, 0.00008, 0.00050)
+
+        if kp_count >= 2:
+            pts = np.array([[kp.pt[0], kp.pt[1]] for kp in kps], dtype=np.float32)
+            sx = float(np.std(pts[:, 0])) / float(max(1.0, w))
+            sy = float(np.std(pts[:, 1])) / float(max(1.0, h))
+            kp_spread = 0.5 * (sx + sy)
+        else:
+            kp_spread = 0.0
+        score_spread = self._range_score(kp_spread, 0.08, 0.22)
+
+        score = (
+            0.40 * score_coverage
+            + 0.25 * score_entropy
+            + 0.20 * score_density
+            + 0.15 * score_spread
+        )
+
+        return {
+            "score": self._clamp01(score),
+            "coverage": float(coverage),
+            "orientation_entropy": float(entropy_norm),
+            "kp_count": int(kp_count),
+            "kp_density": float(kp_density),
+            "kp_spread": float(kp_spread),
+        }
+
     def quality_score(self, img: np.ndarray) -> float:
         """
         Heuristic quality score in [0, 1].
@@ -93,7 +176,7 @@ class FingerprintEngineV2:
     def extract_template(self, img_gray: np.ndarray) -> dict:
         proc = self.preprocess(img_gray)
         kps, des = self.detector.detectAndCompute(proc, None)
-        if des is None or len(kps) < 6:
+        if des is None or len(kps) < 20:
             raise ValueError("Fingerprint features not found. Use a clearer image.")
 
         kp_coords = [[float(p.pt[0]), float(p.pt[1])] for p in kps]

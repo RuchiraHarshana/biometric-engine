@@ -34,6 +34,7 @@ fp_engine_v2 = FingerprintEngineV2()
 FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
 FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.35"))
 FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.20"))
+FINGERPRINT_V2_LIKENESS_THRESHOLD = float(os.getenv("FINGERPRINT_V2_LIKENESS_THRESHOLD", "0.42"))
 
 
 async def _read_form_upload(request: Request, field: str = "image"):
@@ -156,19 +157,15 @@ async def fingerprint_template_v2(request: Request):
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
 
-        # Two-gate approach:
-        # Gate 1 — low-bar ORB coherence check (threshold 0.15) to reject obvious
-        #           non-fingerprints (diagrams, faces, text) without blocking phone photos.
-        #           The legacy scorer's high threshold (0.65) was too strict for photos;
-        #           0.15 catches only clear non-biometrics.
-        fp_components = fp_engine.fingerprint_score_components(img)
-        fp_score = float(fp_components.get("score", 0.0))
-        if fp_score < FINGERPRINT_V2_FP_SCORE_THRESHOLD:
+        # Dedicated v2 fingerprint-likeness gate designed to reject drawings/diagrams.
+        likeness = fp_engine_v2.fingerprint_likeness_components(img)
+        like_score = float(likeness.get("score", 0.0))
+        if like_score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
             return {
                 "error": "Image does not appear to be a fingerprint.",
-                "fp_score": fp_score,
-                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
-                "fp_components": fp_components,
+                "likeness_score": like_score,
+                "likeness_threshold": FINGERPRINT_V2_LIKENESS_THRESHOLD,
+                "likeness_components": likeness,
             }
 
         # Gate 2 — v2 quality score (edge density + sharpness).
@@ -185,7 +182,9 @@ async def fingerprint_template_v2(request: Request):
             "template": template,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
-            "fp_score": fp_score,
+            "likeness_score": like_score,
+            "likeness_threshold": FINGERPRINT_V2_LIKENESS_THRESHOLD,
+            "likeness_components": likeness,
             "algorithm": "akaze_v2",
         }
     except ValueError as e:
@@ -209,18 +208,18 @@ async def fingerprint_match_v2(request: Request):
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
 
-        # Gate 1 — low-bar ORB coherence check (threshold 0.15).
-        fp_components = fp_engine.fingerprint_score_components(img)
-        fp_score = float(fp_components.get("score", 0.0))
-        if fp_score < FINGERPRINT_V2_FP_SCORE_THRESHOLD:
+        # Gate 1 — dedicated v2 fingerprint-likeness detector.
+        likeness = fp_engine_v2.fingerprint_likeness_components(img)
+        like_score = float(likeness.get("score", 0.0))
+        if like_score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
             return {
                 "best_index": None,
                 "score": 0.0,
                 "matched": False,
                 "tier": "reject_non_fingerprint",
-                "fp_score": fp_score,
-                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
-                "fp_components": fp_components,
+                "likeness_score": like_score,
+                "likeness_threshold": FINGERPRINT_V2_LIKENESS_THRESHOLD,
+                "likeness_components": likeness,
             }
 
         # Gate 2 — v2 quality score.
@@ -265,6 +264,9 @@ async def fingerprint_match_v2(request: Request):
             "tier": tier,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "likeness_score": like_score,
+            "likeness_threshold": FINGERPRINT_V2_LIKENESS_THRESHOLD,
+            "likeness_components": likeness,
             "threshold": FINGERPRINT_V2_THRESHOLD,
             "algorithm": "akaze_v2",
         }
