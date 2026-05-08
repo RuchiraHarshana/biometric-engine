@@ -33,7 +33,7 @@ fp_engine = FingerprintEngine()
 fp_engine_v2 = FingerprintEngineV2()
 FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
 FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.12"))
-FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.65"))
+FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.15"))
 
 
 async def _read_form_upload(request: Request, field: str = "image"):
@@ -156,8 +156,22 @@ async def fingerprint_template_v2(request: Request):
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
 
-        # Use v2's own quality gate only — the legacy ORB coherence scorer
-        # was built for scanner images and falsely rejects photographed fingerprints.
+        # Two-gate approach:
+        # Gate 1 — low-bar ORB coherence check (threshold 0.15) to reject obvious
+        #           non-fingerprints (diagrams, faces, text) without blocking phone photos.
+        #           The legacy scorer's high threshold (0.65) was too strict for photos;
+        #           0.15 catches only clear non-biometrics.
+        fp_components = fp_engine.fingerprint_score_components(img)
+        fp_score = float(fp_components.get("score", 0.0))
+        if fp_score < FINGERPRINT_V2_FP_SCORE_THRESHOLD:
+            return {
+                "error": "Image does not appear to be a fingerprint.",
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
+            }
+
+        # Gate 2 — v2 quality score (edge density + sharpness).
         quality = fp_engine_v2.quality_score(img)
         if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
             return {
@@ -171,6 +185,7 @@ async def fingerprint_template_v2(request: Request):
             "template": template,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "fp_score": fp_score,
             "algorithm": "akaze_v2",
         }
     except ValueError as e:
@@ -194,7 +209,21 @@ async def fingerprint_match_v2(request: Request):
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
 
-        # Use v2's own quality gate only — legacy ORB scorer falsely rejects photographed prints.
+        # Gate 1 — low-bar ORB coherence check (threshold 0.15).
+        fp_components = fp_engine.fingerprint_score_components(img)
+        fp_score = float(fp_components.get("score", 0.0))
+        if fp_score < FINGERPRINT_V2_FP_SCORE_THRESHOLD:
+            return {
+                "best_index": None,
+                "score": 0.0,
+                "matched": False,
+                "tier": "reject_non_fingerprint",
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
+            }
+
+        # Gate 2 — v2 quality score.
         quality = fp_engine_v2.quality_score(img)
         if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
             return {
