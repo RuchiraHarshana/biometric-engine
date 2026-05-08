@@ -74,7 +74,7 @@ class FingerprintEngineV2:
     def extract_template(self, img_gray: np.ndarray) -> dict:
         proc = self.preprocess(img_gray)
         kps, des = self.detector.detectAndCompute(proc, None)
-        if des is None or len(kps) < 12:
+        if des is None or len(kps) < 6:
             raise ValueError("Fingerprint features not found. Use a clearer image.")
 
         kp_coords = [[float(p.pt[0]), float(p.pt[1])] for p in kps]
@@ -107,22 +107,22 @@ class FingerprintEngineV2:
                 if len(pair) < 2:
                     continue
                 m, n = pair
-                if m.distance < 0.78 * n.distance:
+                if m.distance < 0.82 * n.distance:  # more permissive ratio test
                     good.append(m)
 
             num_good = len(good)
             if num_good == 0:
                 return 0.0
 
-            if q_kps is not None and d_kps is not None and num_good >= 8:
+            if q_kps is not None and d_kps is not None and num_good >= 6:
                 pts_q = np.float32([q_kps[m.queryIdx] for m in good]).reshape(-1, 2)
                 pts_d = np.float32([d_kps[m.trainIdx] for m in good]).reshape(-1, 2)
-                _, mask = cv2.findHomography(pts_q, pts_d, cv2.RANSAC, 4.5)
+                _, mask = cv2.findHomography(pts_q, pts_d, cv2.RANSAC, 6.0)  # more tolerant RANSAC
                 inliers = int(np.sum(mask)) if mask is not None else 0
                 inlier_ratio = inliers / float(max(1, num_good))
-                score = 0.75 * inlier_ratio + 0.25 * min(1.0, num_good / 70.0)
+                score = 0.75 * inlier_ratio + 0.25 * min(1.0, num_good / 40.0)  # 40 good = full score
                 return float(max(0.0, min(1.0, score)))
 
-            return float(min(1.0, num_good / 80.0))
+            return float(min(1.0, num_good / 40.0))
         except Exception:
             return 0.0
