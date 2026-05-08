@@ -1,8 +1,9 @@
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "https://biometric-engine-staging-mvmxear46a-uc.a.run.app"
 
-const FP_API_MODE = (process.env.NEXT_PUBLIC_FINGERPRINT_API_MODE || "v2").toLowerCase()
-const USE_FP_V2 = FP_API_MODE === "v2" || FP_API_MODE === "experimental"
+// Force v2 fingerprint routes so frontend cannot accidentally fall back to legacy
+// matching/enrollment behavior via environment misconfiguration.
+const USE_FP_V2 = true
 
 export const SCANNER_WS_URL = "ws://127.0.0.1:9100/ws"
 export const SCANNER_HEALTH_URL = "http://127.0.0.1:9100/health"

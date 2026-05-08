@@ -18,6 +18,24 @@ export async function updatePerson(personId: string, updates: Record<string, any
 import { API_ENDPOINTS } from "@/lib/api-config"
 import { authHeaders } from "@/lib/auth"
 
+function stringifyMaybeObject(value: unknown): string {
+  if (typeof value === "string") return value
+  if (value == null) return ""
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+async function throwApiError(res: Response): Promise<never> {
+  const payload = await res.json().catch(() => null as any)
+  const detail = payload?.detail ?? payload?.error ?? payload
+  const detailText = stringifyMaybeObject(detail)
+  const message = detailText || `HTTP ${res.status}`
+  throw new Error(message)
+}
+
 // --- Generic helpers ---
 
 async function authFetch(url: string, init?: RequestInit) {
@@ -26,8 +44,7 @@ async function authFetch(url: string, init?: RequestInit) {
     headers: { ...authHeaders(), ...init?.headers },
   })
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
-    throw new Error(err.detail || `HTTP ${res.status}`)
+    await throwApiError(res)
   }
   return res.json()
 }
@@ -39,8 +56,7 @@ async function authFormPost(url: string, formData: FormData) {
     body: formData,
   })
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
-    throw new Error(err.detail || `HTTP ${res.status}`)
+    await throwApiError(res)
   }
   return res.json()
 }
