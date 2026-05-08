@@ -1,6 +1,9 @@
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "https://biometric-engine-staging-mvmxear46a-uc.a.run.app"
 
+const FP_API_MODE = (process.env.NEXT_PUBLIC_FINGERPRINT_API_MODE || "v2").toLowerCase()
+const USE_FP_V2 = FP_API_MODE === "v2" || FP_API_MODE === "experimental"
+
 export const SCANNER_WS_URL = "ws://127.0.0.1:9100/ws"
 export const SCANNER_HEALTH_URL = "http://127.0.0.1:9100/health"
 
@@ -23,11 +26,15 @@ export const API_ENDPOINTS = {
 
   // Enrollment
   enrollFace: `${API_BASE_URL}/api/enroll/face`,
-  enrollFingerprint: `${API_BASE_URL}/api/enroll/fingerprint`,
+  enrollFingerprint: USE_FP_V2
+    ? `${API_BASE_URL}/api/experimental/enroll/fingerprint`
+    : `${API_BASE_URL}/api/enroll/fingerprint`,
 
   // Matching
   matchFace: `${API_BASE_URL}/api/match/face`,
-  matchFingerprint: `${API_BASE_URL}/api/match/fingerprint`,
+  matchFingerprint: USE_FP_V2
+    ? `${API_BASE_URL}/api/experimental/match/fingerprint`
+    : `${API_BASE_URL}/api/match/fingerprint`,
 
   // Combined Verify
   verify: `${API_BASE_URL}/api/verify`,

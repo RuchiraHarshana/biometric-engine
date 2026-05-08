@@ -89,14 +89,18 @@ export async function enrollFingerprint(
     address?: string
     criminal_records?: string
     capture_method?: string
+    finger_label?: string
   },
 ) {
   const fd = new FormData()
   fd.append("person_id", personId)
   fd.append("image", file)
   fd.append("capture_method", data?.capture_method || "image_upload")
+  if (data?.finger_label) {
+    fd.append("finger_label", data.finger_label)
+  }
   if (data) {
-    const { capture_method, ...rest } = data
+    const { capture_method, finger_label, ...rest } = data
     Object.entries(rest).forEach(([key, value]) => {
       if (value) fd.append(key, value)
     })
@@ -114,9 +118,15 @@ export async function matchFace(file: File) {
 
 // --- Fingerprint Matching ---
 
-export async function matchFingerprint(file: File) {
+export async function matchFingerprint(file: File, opts?: { capture_method?: string; finger_label?: string }) {
   const fd = new FormData()
   fd.append("image", file)
+  if (opts?.capture_method) {
+    fd.append("capture_method", opts.capture_method)
+  }
+  if (opts?.finger_label) {
+    fd.append("finger_label", opts.finger_label)
+  }
   return authFormPost(API_ENDPOINTS.matchFingerprint, fd)
 }
 
