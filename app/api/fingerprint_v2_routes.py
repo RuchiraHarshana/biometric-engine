@@ -41,6 +41,11 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
 @router_fp_v2.post("/experimental/enroll/fingerprint", tags=["Fingerprint V2"])
 async def enroll_fingerprint_v2(
     person_id: str = Form(...),
+    full_name: str = Form(""),
+    email: str = Form(None),
+    mobile_number: str = Form(None),
+    address: str = Form(None),
+    criminal_records: str = Form(None),
     finger_label: str = Form("right_thumb"),
     capture_method: str = Form("image_upload"),
     image: UploadFile = File(...),
@@ -60,15 +65,33 @@ async def enroll_fingerprint_v2(
         if "error" in payload or "template" not in payload:
             quality = payload.get("quality_score")
             qtxt = f"{quality:.2f}" if isinstance(quality, (int, float)) else "N/A"
+            fp_score = payload.get("fp_score")
+            fptxt = f"{fp_score:.2f}" if isinstance(fp_score, (int, float)) else "N/A"
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Fingerprint V2 quality check failed. "
-                    f"quality_score={qtxt}. Please recapture a clearer image."
+                    f"Fingerprint V2 validation failed: {payload.get('error', 'invalid image')}. "
+                    f"quality_score={qtxt}, fp_score={fptxt}. Please use a clearer fingerprint image."
                 ),
             )
 
         template = payload["template"]
+
+        # Keep compatibility with legacy enroll flow: ensure person exists first.
+        person_payload = {
+            "person_id": person_id,
+            "full_name": full_name or None,
+            "email": email,
+            "mobile_number": mobile_number,
+            "address": address,
+            "criminal_records": criminal_records,
+        }
+        persons = await sb.get("persons", filters={"person_id": person_id})
+        if persons:
+            await sb.update("persons", {"person_id": person_id}, person_payload)
+        else:
+            await sb.insert("persons", person_payload)
+
         row_payload = {
             "person_id": person_id,
             "finger_label": finger_label,

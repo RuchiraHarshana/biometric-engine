@@ -3,12 +3,10 @@ import os
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from starlette.formparsers import MultiPartParser
+from fastapi import FastAPI, Request, HTTPException
 
-# Increase multipart upload limit (default 8 MB is too small for high-res fingerprint images)
-_MAX_MULTIPART_MB = int(os.getenv("MAX_MULTIPART_PART_MB", "32"))
-MultiPartParser.max_part_size = _MAX_MULTIPART_MB * 1024 * 1024
+
+MAX_MULTIPART_PART_SIZE = int(float(os.getenv("MAX_MULTIPART_PART_MB", "32")) * 1024 * 1024)
 
 from app.core.config import FACE_MODEL_PATH
 from app.engines.face_engine import FaceEngineONNX
@@ -33,8 +31,17 @@ def get_face_engine() -> FaceEngineONNX:
 
 fp_engine = FingerprintEngine()
 fp_engine_v2 = FingerprintEngineV2()
-FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.32"))
-FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.25"))
+FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
+FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.12"))
+FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.65"))
+
+
+async def _read_form_upload(request: Request, field: str = "image"):
+    form = await request.form(max_part_size=MAX_MULTIPART_PART_SIZE)
+    upload = form.get(field)
+    if upload is None:
+        raise HTTPException(status_code=400, detail=f"Missing '{field}' file field")
+    return upload, form
 
 
 @app.get("/health")
@@ -43,9 +50,10 @@ def health():
 
 
 @app.post("/face/embedding")
-async def face_embedding(image: UploadFile = File(...)):
+async def face_embedding(request: Request):
     try:
         engine = get_face_engine()
+        image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = engine.read_image(img_bytes)
         emb = engine.get_embedding(img)
@@ -57,8 +65,9 @@ async def face_embedding(image: UploadFile = File(...)):
 
 
 @app.post("/fingerprint/template")
-async def fingerprint_template(image: UploadFile = File(...)):
+async def fingerprint_template(request: Request):
     try:
+        image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = fp_engine.read_image(img_bytes)
         comps = fp_engine.fingerprint_score_components(img)
@@ -80,11 +89,13 @@ async def fingerprint_template(image: UploadFile = File(...)):
 
 
 @app.post("/fingerprint/match")
-async def fingerprint_match(
-    image: UploadFile = File(...),
-    templates: str = Form(...),
-):
+async def fingerprint_match(request: Request):
     try:
+        image, form = await _read_form_upload(request, "image")
+        templates = form.get("templates")
+        if not templates:
+            raise HTTPException(status_code=400, detail="Missing 'templates' form field")
+
         tpl_list = json.loads(templates)
         if not isinstance(tpl_list, list) or not tpl_list:
             return {"best_index": None, "score": 0.0}
@@ -139,14 +150,18 @@ async def fingerprint_match(
 
 
 @app.post("/fingerprint_v2/template")
-async def fingerprint_template_v2(image: UploadFile = File(...)):
+async def fingerprint_template_v2(request: Request):
     try:
+        image, _ = await _read_form_upload(request, "image")
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
+
+        # Use v2's own quality gate only — the legacy ORB coherence scorer
+        # was built for scanner images and falsely rejects photographed fingerprints.
         quality = fp_engine_v2.quality_score(img)
         if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
             return {
-                "error": "Fingerprint image quality too low.",
+                "error": "Fingerprint image quality too low. Please use a clearer, well-lit image.",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
             }
@@ -165,17 +180,21 @@ async def fingerprint_template_v2(image: UploadFile = File(...)):
 
 
 @app.post("/fingerprint_v2/match")
-async def fingerprint_match_v2(
-    image: UploadFile = File(...),
-    templates: str = Form(...),
-):
+async def fingerprint_match_v2(request: Request):
     try:
+        image, form = await _read_form_upload(request, "image")
+        templates = form.get("templates")
+        if not templates:
+            raise HTTPException(status_code=400, detail="Missing 'templates' form field")
+
         tpl_list = json.loads(templates)
         if not isinstance(tpl_list, list) or not tpl_list:
             return {"best_index": None, "score": 0.0, "matched": False, "tier": "no_templates"}
 
         img_bytes = await image.read()
         img = fp_engine_v2.read_image(img_bytes)
+
+        # Use v2's own quality gate only — legacy ORB scorer falsely rejects photographed prints.
         quality = fp_engine_v2.quality_score(img)
         if quality < FINGERPRINT_V2_QUALITY_THRESHOLD:
             return {
@@ -205,6 +224,9 @@ async def fingerprint_match_v2(
                 "tier": "no_match",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "fp_score": fp_score,
+                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+                "fp_components": fp_components,
                 "threshold": FINGERPRINT_V2_THRESHOLD,
             }
 
@@ -217,6 +239,9 @@ async def fingerprint_match_v2(
             "tier": tier,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+            "fp_score": fp_score,
+            "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
+            "fp_components": fp_components,
             "threshold": FINGERPRINT_V2_THRESHOLD,
             "algorithm": "akaze_v2",
         }
