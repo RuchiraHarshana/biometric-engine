@@ -224,9 +224,6 @@ async def fingerprint_match_v2(request: Request):
                 "tier": "no_match",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
-                "fp_score": fp_score,
-                "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
-                "fp_components": fp_components,
                 "threshold": FINGERPRINT_V2_THRESHOLD,
             }
 
@@ -239,9 +236,6 @@ async def fingerprint_match_v2(request: Request):
             "tier": tier,
             "quality_score": quality,
             "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
-            "fp_score": fp_score,
-            "fp_threshold": FINGERPRINT_V2_FP_SCORE_THRESHOLD,
-            "fp_components": fp_components,
             "threshold": FINGERPRINT_V2_THRESHOLD,
             "algorithm": "akaze_v2",
         }
