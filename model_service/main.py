@@ -4,6 +4,11 @@ from typing import Optional
 
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from starlette.formparsers import MultiPartParser
+
+# Increase multipart upload limit (default 8 MB is too small for high-res fingerprint images)
+_MAX_MULTIPART_MB = int(os.getenv("MAX_MULTIPART_PART_MB", "32"))
+MultiPartParser.max_part_size = _MAX_MULTIPART_MB * 1024 * 1024
 
 from app.core.config import FACE_MODEL_PATH
 from app.engines.face_engine import FaceEngineONNX
