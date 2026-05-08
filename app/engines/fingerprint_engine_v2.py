@@ -55,20 +55,35 @@ class FingerprintEngineV2:
 
     def quality_score(self, img: np.ndarray) -> float:
         """
-        Heuristic quality score in [0, 1] combining edge density and sharpness.
+        Heuristic quality score in [0, 1].
+
+        Three components:
+        - coverage  (weight 0.65): fraction of pixels with non-trivial gradient.
+                    Fingerprints: ridges fill the whole image → high coverage (>0.3).
+                    Diagrams/drawings on white: only a few lines → very low coverage (<0.08).
+        - edge_density (0.20): Canny edge fraction.
+        - sharpness   (0.15): Laplacian variance.
         """
         proc = self.preprocess(img)
         h, w = proc.shape
         if h == 0 or w == 0:
             return 0.0
 
+        # Coverage — the key discriminator against diagrams.
+        gx = cv2.Sobel(proc.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(proc.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(gx * gx + gy * gy)
+        coverage = float(np.sum(grad_mag > 8.0)) / float(h * w)
+        score_coverage = min(1.0, coverage / 0.28)  # 0.28 coverage → full score
+
         edges = cv2.Canny(proc, 45, 140)
         edge_density = float(np.sum(edges > 0)) / float(h * w)
-        lap_var = float(cv2.Laplacian(proc, cv2.CV_32F).var())
-
         score_edge = min(1.0, max(0.0, edge_density / 0.25))
+
+        lap_var = float(cv2.Laplacian(proc, cv2.CV_32F).var())
         score_sharp = min(1.0, lap_var / 300.0)
-        score = 0.55 * score_edge + 0.45 * score_sharp
+
+        score = 0.65 * score_coverage + 0.20 * score_edge + 0.15 * score_sharp
         return float(max(0.0, min(1.0, score)))
 
     def extract_template(self, img_gray: np.ndarray) -> dict:
