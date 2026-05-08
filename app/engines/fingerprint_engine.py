@@ -82,15 +82,24 @@ class FingerprintEngine:
         try:
             block = 16
             theta = np.arctan2(gy, gx)
+            grad_mag_map = np.sqrt(gx * gx + gy * gy)
             hblocks = max(1, h // block)
             wblocks = max(1, w // block)
-            coherences = []
+            weighted_coh_sum = 0.0
+            weight_sum = 0.0
             for by in range(hblocks):
                 for bx in range(wblocks):
                     y0 = by * block
                     x0 = bx * block
                     patch = theta[y0:y0 + block, x0:x0 + block]
+                    mag_patch = grad_mag_map[y0:y0 + block, x0:x0 + block]
                     if patch.size == 0:
+                        continue
+                    # Weight by mean gradient magnitude so blank blocks (arctan2(0,0)=0 -> coh=1)
+                    # don't inflate the score. A white diagram is ~80% blank blocks that
+                    # previously each contributed coherence=1.0 to the mean.
+                    block_weight = float(np.mean(mag_patch))
+                    if block_weight < 2.0:
                         continue
                     vcos = np.cos(2.0 * patch)
                     vsin = np.sin(2.0 * patch)
@@ -98,8 +107,9 @@ class FingerprintEngine:
                     sumy = float(np.sum(vsin))
                     norm = np.sqrt(sumx * sumx + sumy * sumy)
                     coherence = norm / (patch.size + 1e-9)
-                    coherences.append(coherence)
-            score_coh = float(np.mean(coherences)) if coherences else 0.0
+                    weighted_coh_sum += coherence * block_weight
+                    weight_sum += block_weight
+            score_coh = float(weighted_coh_sum / (weight_sum + 1e-9)) if weight_sum > 0 else 0.0
             score_coh = min(1.0, max(0.0, score_coh))
         except Exception:
             score_coh = 0.0

@@ -58,24 +58,28 @@ class FingerprintEngineV2:
         Heuristic quality score in [0, 1].
 
         Three components:
-        - coverage  (weight 0.65): fraction of pixels with non-trivial gradient.
-                    Fingerprints: ridges fill the whole image → high coverage (>0.3).
-                    Diagrams/drawings on white: only a few lines → very low coverage (<0.08).
-        - edge_density (0.20): Canny edge fraction.
-        - sharpness   (0.15): Laplacian variance.
+        - coverage  (weight 0.65): fraction of pixels with non-trivial gradient,
+                measured on the RAW image before CLAHE. CLAHE amplifies noise on
+                blank white areas, creating fake gradients and inflating coverage.
+                Fingerprints have ridges across the whole image (coverage >0.25).
+                Diagrams on white paper have only a few lines (coverage <0.04).
+        - edge_density (0.20): Canny edge fraction on preprocessed image.
+        - sharpness   (0.15): Laplacian variance on preprocessed image.
         """
-        proc = self.preprocess(img)
-        h, w = proc.shape
+        h, w = img.shape[:2]
         if h == 0 or w == 0:
             return 0.0
 
-        # Coverage — the key discriminator against diagrams.
-        gx = cv2.Sobel(proc.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(proc.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(gx * gx + gy * gy)
-        coverage = float(np.sum(grad_mag > 8.0)) / float(h * w)
-        score_coverage = min(1.0, coverage / 0.28)  # 0.28 coverage → full score
+        # Coverage on the raw normalized image — before CLAHE so blank-area noise
+        # isn't amplified into fake ridges.
+        raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+        gx_r = cv2.Sobel(raw_norm.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+        gy_r = cv2.Sobel(raw_norm.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(gx_r * gx_r + gy_r * gy_r)
+        coverage = float(np.sum(grad_mag > 12.0)) / float(h * w)
+        score_coverage = min(1.0, coverage / 0.25)  # 0.25 coverage -> full score
 
+        proc = self.preprocess(img)
         edges = cv2.Canny(proc, 45, 140)
         edge_density = float(np.sum(edges > 0)) / float(h * w)
         score_edge = min(1.0, max(0.0, edge_density / 0.25))
