@@ -1,6 +1,8 @@
 import json
 
+import cv2
 import httpx
+import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth.dependencies import require_register_access, require_verify_access
@@ -11,6 +13,33 @@ from app.storage.supabase_client import client as sb
 router_fp_v2 = APIRouter()
 MAX_MATCH_BATCH_BYTES = 6 * 1024 * 1024
 MAX_MATCH_BATCH_ITEMS = 120
+
+
+def _normalize_fingerprint_upload(img_bytes: bytes, max_dim: int = 1200) -> bytes:
+    """Normalize large uploads to keep inference latency and payload size bounded."""
+    try:
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return img_bytes
+
+        h, w = img.shape[:2]
+        longest = max(h, w)
+        if longest <= max_dim:
+            return img_bytes
+
+        scale = float(max_dim) / float(longest)
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # Encode as JPEG to keep body size predictable.
+        ok, out = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ok:
+            return img_bytes
+        return out.tobytes()
+    except Exception:
+        return img_bytes
 
 
 def _v2_table_help() -> str:
@@ -57,6 +86,7 @@ async def enroll_fingerprint_v2(
         img_bytes = await image.read()
         if not img_bytes or len(img_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty image file")
+        img_bytes = _normalize_fingerprint_upload(img_bytes)
 
         files = {
             "image": (
