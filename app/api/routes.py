@@ -67,7 +67,7 @@ async def list_persons(_admin=Depends(require_admin)):
     for p in persons:
         person_id = p.get("person_id")
         has_face = bool((await sb.get("face_embeddings", filters={"person_id": person_id})))
-        has_fp = bool((await sb.get("fingerprint_templates", filters={"person_id": person_id})))
+        has_fp = bool((await sb.get("fingerprint_templates_v2", filters={"person_id": person_id})))
         out.append(
             {
                 "person_id": person_id,
