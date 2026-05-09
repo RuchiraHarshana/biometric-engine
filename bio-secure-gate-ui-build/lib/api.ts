@@ -49,9 +49,9 @@ async function authFetch(url: string, init?: RequestInit) {
   return res.json()
 }
 
-async function authFormPost(url: string, formData: FormData) {
+async function authFormPost(url: string, formData: FormData, timeoutMs = 45000) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 45000)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   try {
     res = await fetch(url, {
@@ -170,7 +170,8 @@ export async function enrollFingerprint(
       if (value) fd.append(key, value)
     })
   }
-  return authFormPost(API_ENDPOINTS.enrollFingerprint, fd)
+  // Enrollment should finish quickly; keep a moderate timeout.
+  return authFormPost(API_ENDPOINTS.enrollFingerprint, fd, 90000)
 }
 
 // --- Face Matching ---
@@ -193,7 +194,8 @@ export async function matchFingerprint(file: File, opts?: { capture_method?: str
   if (opts?.finger_label) {
     fd.append("finger_label", opts.finger_label)
   }
-  return authFormPost(API_ENDPOINTS.matchFingerprint, fd)
+  // Matching can take longer with many stored templates (batched backend matching).
+  return authFormPost(API_ENDPOINTS.matchFingerprint, fd, 180000)
 }
 
 // --- Combined Verify ---
