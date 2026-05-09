@@ -369,6 +369,23 @@ async def match_fingerprint_v2(
         person_id = best_rec.get("person_id")
         person    = pmap.get(person_id, {}) if person_id else {}
 
+        # Detect likely stale enrollment: best score suspiciously low AND stored
+        # template algorithm != current engine.  Even if version tags match (both
+        # say hybrid_v2), the fingerprint might have been enrolled on a different
+        # server build.  Guide the user to re-enroll when score looks wrong.
+        stored_alg = ""
+        stored_tpl = _deserialize_tpl(best_rec.get("template"))
+        if stored_tpl:
+            stored_alg = stored_tpl.get("algorithm", "")
+        hint = None
+        if not matched and best_score < 0.30:
+            hint = (
+                "Similarity is very low. If you enrolled and matched the same fingerprint image, "
+                "this usually means the stored template was created by a different engine version. "
+                f"Stored template algorithm: '{stored_alg}'. "
+                "Please re-enroll this person from the admin panel and try again."
+            )
+
         return {
             "matched": matched,
             "person_id": person_id if matched else None,
@@ -383,6 +400,7 @@ async def match_fingerprint_v2(
             "likeness_threshold": likeness_threshold,
             "minutiae_count": analysis["minutiae_count"],
             "tier": "auto" if matched else "reject_low_similarity",
+            "hint": hint,
             "algorithm": "hybrid_v2",
             "finger_label": best_rec.get("finger_label") or (finger_label or None),
         }

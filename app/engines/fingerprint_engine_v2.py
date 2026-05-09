@@ -43,9 +43,9 @@ _N_ORI          = 8           # Gabor orientations
 _BLOCK          = 16          # segmentation block size
 _BORDER         = 16          # ignore minutiae this close to edge (px)
 _MIN_MINUTIAE   = 20          # below this -> not a fingerprint
-_N_ANCHORS      = 10          # anchor pairs tried per match
-_POS_THRESH     = 18.0        # px  position tolerance for minutia match
-_ANG_THRESH     = 22.0        # deg angle tolerance
+_N_ANCHORS      = 25          # anchor pairs tried per match (top-N by quality)
+_POS_THRESH     = 25.0        # px  position tolerance (raised for ink scans)
+_ANG_THRESH     = 30.0        # deg angle tolerance  (raised for ink scans)
 _MIN_DIST       = 8.0         # px  deduplicate minutiae closer than this
 _NBC_K          = 5           # MCC neighborhood size
 _NBC_THRESH     = 0.40        # fraction of neighborhood that must be consistent
@@ -478,7 +478,16 @@ class FingerprintEngineV2:
         return self._hybrid_match(m_a, m_b)
 
     def _hybrid_match(self, m_a: list, m_b: list) -> float:
-        """Steps B+C+D: alignment + MCC neighborhood consistency + quality weighting."""
+        """Steps B+C+D: alignment + MCC neighborhood consistency.
+
+        Scoring formula:
+          raw   = matched_count / min(na, nb)   -- fraction of smaller set matched
+          score = raw * (0.4 + 0.6 * nbc)       -- weighted by neighborhood consistency
+
+        At threshold 0.40 a genuine same-finger match needs ~50% minutiae aligned
+        with decent neighborhood consistency (nbc >= 0.5).
+        Random imposters score < 0.10 (few chance alignments, no spatial consistency).
+        """
         def _arr(lst):
             return np.array([
                 [float(m[0]), float(m[1]), float(m[2]),
@@ -491,18 +500,16 @@ class FingerprintEngineV2:
         arr_b = _arr(m_b)
         na, nb = len(arr_a), len(arr_b)
         best_score = 0.0
+        norm = float(min(na, nb))  # fraction of smaller template matched
 
         for i in range(min(_N_ANCHORS, na)):
             for j in range(min(_N_ANCHORS, nb)):
                 count, pairs = self._aligned_pairs(arr_a, arr_b, i, j)
                 if count < 4:
                     continue
-                nbc = self._neighborhood_consistency(arr_a, arr_b, pairs)
-                raw = float(count) / math.sqrt(max(1, na) * max(1, nb))
-                # Simpler formula: nbc is neighbourhood consistency (0-1).
-                # Removing the quality-weight multiplier which was over-penalising
-                # genuine matches that happen to have moderate minutia quality.
-                score = raw * (0.5 + 0.5 * nbc)
+                nbc   = self._neighborhood_consistency(arr_a, arr_b, pairs)
+                raw   = float(count) / norm
+                score = raw * (0.4 + 0.6 * nbc)
                 if score > best_score:
                     best_score = score
 
