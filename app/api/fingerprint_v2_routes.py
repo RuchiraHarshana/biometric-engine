@@ -120,7 +120,7 @@ def _deserialize_tpl(tpl) -> dict | None:
             return None
     if not isinstance(tpl, dict):
         return None
-    # Accept both minutiae_v1 and legacy AKAZE formats
+    # Accept hybrid_v1, minutiae_v1, and legacy AKAZE formats
     if "minutiae" not in tpl and "des" not in tpl:
         return None
     return tpl
@@ -162,7 +162,7 @@ async def enroll_fingerprint_v2(
         likeness   = _safe_float(analysis["likeness"], 0.0)
         quality    = _safe_float(analysis["quality"], 0.0)
         count      = int(analysis["minutiae_count"])
-        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.40)
+        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.50)
         quality_threshold  = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.28)
 
         if likeness < likeness_threshold:
@@ -206,7 +206,7 @@ async def enroll_fingerprint_v2(
             "finger_label": finger_label,
             "template": template,
             "capture_method": capture_method,
-            "algorithm": "minutiae_v1",
+            "algorithm": "hybrid_v1",
             "quality_score": quality,
         }
 
@@ -278,7 +278,7 @@ async def match_fingerprint_v2(
         analysis = _local_fp_v2.analyze(img)
         like_score         = _safe_float(analysis["likeness"], 0.0)
         quality            = _safe_float(analysis["quality"], 0.0)
-        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.40)
+        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.50)
         quality_threshold  = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.28)
 
         if like_score < likeness_threshold:
@@ -292,7 +292,7 @@ async def match_fingerprint_v2(
                 "minutiae_count": analysis["minutiae_count"],
                 "reasons": ["low_likeness_score"],
                 "tier": "reject_non_fingerprint",
-                "algorithm": "minutiae_v1",
+                "algorithm": "hybrid_v1",
                 "finger_label": finger_label or None,
             }
 
@@ -307,12 +307,12 @@ async def match_fingerprint_v2(
                 "minutiae_count": analysis["minutiae_count"],
                 "reasons": ["low_quality_fingerprint_image"],
                 "tier": "reject_quality",
-                "algorithm": "minutiae_v1",
+                "algorithm": "hybrid_v1",
                 "finger_label": finger_label or None,
             }
 
         query_tpl = analysis["template"]
-        threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.35)
+        threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.50)
 
         # Match query template against every stored template (rotation tolerance
         # is built into the minutiae matching algorithm — no multi-angle variants needed)
@@ -342,7 +342,7 @@ async def match_fingerprint_v2(
                 "likeness_score": like_score,
                 "threshold": threshold,
                 "tier": "no_match",
-                "algorithm": "minutiae_v1",
+                "algorithm": "hybrid_v1",
             }
 
         best_score = max(0.0, best_score)
@@ -364,7 +364,7 @@ async def match_fingerprint_v2(
             "likeness_threshold": likeness_threshold,
             "minutiae_count": analysis["minutiae_count"],
             "tier": "auto" if matched else "reject_low_similarity",
-            "algorithm": "minutiae_v1",
+            "algorithm": "hybrid_v1",
             "finger_label": best_rec.get("finger_label") or (finger_label or None),
         }
     except HTTPException:
