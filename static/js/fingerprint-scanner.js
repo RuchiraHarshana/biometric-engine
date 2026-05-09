@@ -171,7 +171,8 @@ function base64ToFile(base64Data, filename = "fingerprint.png") {
  * @returns {Promise<object>}
  */
 async function enrollFingerprint(apiBase, token, formData) {
-  const resp = await fetch(`${apiBase}/api/enroll/fingerprint`, {
+  // Force v2 endpoint to ensure anti-diagram gates are applied
+  const resp = await fetch(`${apiBase}/api/experimental/enroll/fingerprint`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
     body: formData,

@@ -79,6 +79,15 @@ async def enroll_fingerprint(
     image: UploadFile = File(...),
     _user=Depends(require_register_access),
 ):
+    """
+    DEPRECATED / BLOCKED: This v1 endpoint is disabled to prevent bypassing v2 anti-diagram checks.
+    Use /experimental/enroll/fingerprint.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy endpoint disabled. Use /api/experimental/enroll/fingerprint.",
+    )
+
     VALID_METHODS = {"image_upload", "usb_scanner", "laptop_scanner"}
     if capture_method not in VALID_METHODS:
         raise HTTPException(status_code=400, detail=f"Invalid capture_method. Must be one of: {VALID_METHODS}")
