@@ -6,13 +6,21 @@ import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth.dependencies import require_register_access, require_verify_access
-from app.core.config import MODEL_SERVICE_TIMEOUT, MODEL_SERVICE_URL
+from app.core.config import (
+    FINGERPRINT_V2_LIKENESS_THRESHOLD,
+    FINGERPRINT_V2_QUALITY_THRESHOLD,
+    FINGERPRINT_V2_THRESHOLD,
+    MODEL_SERVICE_TIMEOUT,
+    MODEL_SERVICE_URL,
+)
+from app.engines.fingerprint_engine_v2 import FingerprintEngineV2
 from app.storage.supabase_client import client as sb
 
 
 router_fp_v2 = APIRouter()
 MAX_MATCH_BATCH_BYTES = 6 * 1024 * 1024
 MAX_MATCH_BATCH_ITEMS = 120
+_local_fp_v2 = FingerprintEngineV2()
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -101,6 +109,84 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=502, detail=f"Model service returned non-object payload: {type(payload).__name__}")
     return payload
+
+
+def _local_match_payload(img_bytes: bytes, tpl_batch: list[dict], fallback_detail: str = "") -> dict:
+    """Fallback matcher used when model-service is unavailable/times out."""
+    img = _local_fp_v2.read_image(img_bytes)
+    likeness = _local_fp_v2.fingerprint_likeness_components(img)
+    like_score = _safe_float(likeness.get("score", 0.0), 0.0)
+    if like_score < _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58):
+        return {
+            "best_index": None,
+            "score": 0.0,
+            "matched": False,
+            "tier": "reject_non_fingerprint",
+            "likeness_score": like_score,
+            "likeness_threshold": _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58),
+            "reasons": ["low_likeness_score_fallback"],
+            "likeness_components": likeness,
+            "threshold": _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18),
+            "algorithm": "akaze_v2_fallback",
+            "fallback_reason": fallback_detail,
+        }
+
+    quality = _safe_float(_local_fp_v2.quality_score(img), 0.0)
+    quality_threshold = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.30)
+    if quality < quality_threshold:
+        return {
+            "best_index": None,
+            "score": 0.0,
+            "matched": False,
+            "tier": "reject_quality",
+            "quality_score": quality,
+            "quality_threshold": quality_threshold,
+            "reasons": ["low_quality_fingerprint_image_fallback"],
+            "threshold": _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18),
+            "algorithm": "akaze_v2_fallback",
+            "fallback_reason": fallback_detail,
+        }
+
+    query_tpl = _local_fp_v2.extract_template(img)
+    best_index = None
+    best_score = float("-inf")
+    for i, tpl in enumerate(tpl_batch):
+        s = _safe_float(_local_fp_v2.match_score(query_tpl, tpl), 0.0)
+        if s > best_score:
+            best_score = s
+            best_index = i
+
+    if best_index is None:
+        return {
+            "best_index": None,
+            "score": 0.0,
+            "matched": False,
+            "tier": "no_match",
+            "quality_score": quality,
+            "quality_threshold": quality_threshold,
+            "threshold": _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18),
+            "algorithm": "akaze_v2_fallback",
+            "fallback_reason": fallback_detail,
+        }
+
+    threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18)
+    matched = best_score >= threshold
+    return {
+        "best_index": int(best_index),
+        "score": float(max(0.0, best_score)),
+        "matched": bool(matched),
+        "tier": "auto" if matched else "reject_low_similarity",
+        "quality_score": quality,
+        "quality_threshold": quality_threshold,
+        "likeness_score": like_score,
+        "likeness_threshold": _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58),
+        "likeness_components": likeness,
+        "threshold": threshold,
+        "algorithm": "akaze_v2_fallback",
+        "query_rotation_deg": 0,
+        "query_variants": 1,
+        "fallback_reason": fallback_detail,
+    }
 
 
 @router_fp_v2.post("/experimental/enroll/fingerprint", tags=["Fingerprint V2"])
@@ -284,15 +370,23 @@ async def match_fingerprint_v2(
             try:
                 payload = await _post_model_service("/fingerprint_v2/match", files=files, data=data)
             except HTTPException as e:
-                # Skip bad/transient model batches instead of failing the whole request.
                 batch_failures += 1
                 last_batch_error = str(e.detail)
-                continue
+                # Fallback to in-process matcher for resilience.
+                try:
+                    payload = _local_match_payload(img_bytes, tpl_batch, fallback_detail=last_batch_error)
+                except Exception as inner:
+                    last_batch_error = f"{last_batch_error}; fallback_error={inner}"
+                    continue
             except Exception as e:
                 # Defensive fallback for unexpected transport/parsing failures.
                 batch_failures += 1
                 last_batch_error = str(e)
-                continue
+                try:
+                    payload = _local_match_payload(img_bytes, tpl_batch, fallback_detail=last_batch_error)
+                except Exception as inner:
+                    last_batch_error = f"{last_batch_error}; fallback_error={inner}"
+                    continue
 
             if not isinstance(payload, dict):
                 batch_failures += 1
