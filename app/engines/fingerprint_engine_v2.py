@@ -231,8 +231,24 @@ class FingerprintEngineV2:
     # -- LAYER 2: Structure analysis ------------------------------------------
 
     def _enhance_and_segment(self, gray: np.ndarray):
-        """CLAHE + two-scale Gabor enhancement + variance segmentation mask."""
+        """CLAHE + two-scale Gabor enhancement + variance segmentation mask.
+
+        Handles two input types:
+          - Grayscale live-scanner captures (typical DPI 500, gradients present)
+          - Near-binary high-contrast ink scans (inked card, paper scan)
+            For these, a pre-blur restores gray gradients so the Gabor bank
+            gets proper ridge/valley contrast rather than hard edges only.
+        """
         resized = cv2.resize(gray, (_W, _H), interpolation=cv2.INTER_AREA)
+
+        # Detect near-binary input: if >60% of pixels are very dark (<40) or
+        # very bright (>215) the image is likely an inked scan already binarized.
+        # Apply a gentle Gaussian blur to restore gradient information before CLAHE.
+        flat = resized.ravel()
+        binary_frac = float(np.mean((flat < 40) | (flat > 215)))
+        if binary_frac > 0.60:
+            resized = cv2.GaussianBlur(resized, (5, 5), 1.2)
+
         clahe   = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         eq      = clahe.apply(resized)
         eq_f    = eq.astype(np.float32)
@@ -352,17 +368,29 @@ class FingerprintEngineV2:
 
     def _thin(self, binary: np.ndarray) -> np.ndarray:
         if _SKIMAGE_OK:
-            return (_skel_fn(binary > 0).astype(np.uint8)) * 255
-        skel = np.zeros_like(binary)
-        el   = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        tmp  = binary.copy()
-        while True:
-            er   = cv2.erode(tmp, el)
-            op   = cv2.dilate(er, el)
-            skel = cv2.bitwise_or(skel, cv2.subtract(tmp, op))
-            tmp  = er
-            if cv2.countNonZero(tmp) == 0:
-                break
+            skel = (_skel_fn(binary > 0).astype(np.uint8)) * 255
+        else:
+            skel = np.zeros_like(binary)
+            el   = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+            tmp  = binary.copy()
+            while True:
+                er   = cv2.erode(tmp, el)
+                op   = cv2.dilate(er, el)
+                skel = cv2.bitwise_or(skel, cv2.subtract(tmp, op))
+                tmp  = er
+                if cv2.countNonZero(tmp) == 0:
+                    break
+
+        # Remove isolated skeleton pixels (noise from ink-scan fragmentation).
+        # A real ridge pixel has at least 1 neighbour; isolated dots have 0.
+        sk = (skel > 0).astype(np.int32)
+        nb = np.zeros_like(sk)
+        nb[1:-1, 1:-1] = (
+            sk[:-2, :-2] + sk[:-2, 1:-1] + sk[:-2, 2:] +
+            sk[1:-1, :-2] +                sk[1:-1, 2:] +
+            sk[2:, :-2]  + sk[2:, 1:-1]  + sk[2:, 2:]
+        )
+        skel[(skel > 0) & (nb == 0)] = 0   # remove isolated dots
         return skel
 
     def _orientation_map(self, enhanced: np.ndarray) -> np.ndarray:
