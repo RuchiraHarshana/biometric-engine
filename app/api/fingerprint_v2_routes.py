@@ -73,8 +73,18 @@ def _is_missing_table_error(exc: Exception) -> bool:
 
 
 async def _post_model_service(path: str, files=None, data=None) -> dict:
-    async with httpx.AsyncClient(base_url=MODEL_SERVICE_URL, timeout=MODEL_SERVICE_TIMEOUT) as client:
-        resp = await client.post(path, files=files, data=data)
+    timeout = MODEL_SERVICE_TIMEOUT
+    if "fingerprint_v2/match" in path:
+        # Matching can be slower under larger template sets.
+        timeout = max(float(MODEL_SERVICE_TIMEOUT), 90.0)
+
+    try:
+        async with httpx.AsyncClient(base_url=MODEL_SERVICE_URL, timeout=timeout) as client:
+            resp = await client.post(path, files=files, data=data)
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail=f"Model service timeout: {e}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Model service connection error: {e}")
 
     if resp.status_code >= 400:
         try:
@@ -84,7 +94,13 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=f"Model service error: {detail}")
 
-    return resp.json()
+    try:
+        payload = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Model service returned invalid JSON: {e}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail=f"Model service returned non-object payload: {type(payload).__name__}")
+    return payload
 
 
 @router_fp_v2.post("/experimental/enroll/fingerprint", tags=["Fingerprint V2"])
@@ -271,6 +287,11 @@ async def match_fingerprint_v2(
                 # Skip bad/transient model batches instead of failing the whole request.
                 batch_failures += 1
                 last_batch_error = str(e.detail)
+                continue
+            except Exception as e:
+                # Defensive fallback for unexpected transport/parsing failures.
+                batch_failures += 1
+                last_batch_error = str(e)
                 continue
 
             if not isinstance(payload, dict):
