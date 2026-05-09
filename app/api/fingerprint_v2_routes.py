@@ -111,6 +111,43 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
     return payload
 
 
+_MATCH_ROTATIONS = (-12, -6, 0, 6, 12)
+
+
+def _extract_query_variants(img: np.ndarray) -> list[dict]:
+    """Extract AKAZE templates at multiple rotation angles for rotation-tolerant matching."""
+    h, w = img.shape[:2]
+    c = (w / 2.0, h / 2.0)
+    variants: list[dict] = []
+    for ang in _MATCH_ROTATIONS:
+        try:
+            if ang == 0:
+                view = img
+            else:
+                M = cv2.getRotationMatrix2D(c, float(ang), 1.0)
+                view = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            tpl = _local_fp_v2.extract_template(view)
+            variants.append(tpl)
+        except Exception:
+            continue
+    return variants
+
+
+def _deserialize_tpl(tpl) -> dict | None:
+    """Safely convert a template from Supabase (may arrive as JSON string or dict)."""
+    if isinstance(tpl, str):
+        try:
+            import json as _json
+            tpl = _json.loads(tpl)
+        except Exception:
+            return None
+    if not isinstance(tpl, dict):
+        return None
+    if "des" not in tpl or "shape" not in tpl:
+        return None
+    return tpl
+
+
 def _local_match_payload(img_bytes: bytes, tpl_batch: list[dict], fallback_detail: str = "") -> dict:
     """Fallback matcher used when model-service is unavailable/times out."""
     img = _local_fp_v2.read_image(img_bytes)
@@ -288,6 +325,11 @@ async def match_fingerprint_v2(
     finger_label: str = Form(""),
     _user=Depends(require_verify_access),
 ):
+    """
+    Match a fingerprint image against all stored templates using the local engine
+    directly (no model-service round-trips per batch). This is fast, reliable, and
+    not subject to Cloud Run per-request timeout accumulation.
+    """
     try:
         filters = {"finger_label": finger_label} if finger_label else None
         rows = await sb.get("fingerprint_templates_v2", filters=filters)
@@ -300,16 +342,9 @@ async def match_fingerprint_v2(
                 "tier": "no_templates",
             }
 
-        templates = []
-        template_records = []
-        for r in rows:
-            tpl_obj = r.get("template")
-            if not tpl_obj:
-                continue
-            templates.append(tpl_obj)
-            template_records.append(r)
-
-        if not templates:
+        # Collect valid template records.
+        template_records = [r for r in rows if r.get("template")]
+        if not template_records:
             return {
                 "matched": False,
                 "person_id": None,
@@ -325,127 +360,97 @@ async def match_fingerprint_v2(
         if not img_bytes or len(img_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty image file")
         img_bytes = _normalize_fingerprint_upload(img_bytes)
-        files = {
-            "image": (
-                image.filename or "fingerprint.jpg",
-                img_bytes,
-                image.content_type or "application/octet-stream",
-            )
-        }
-        batches = []
-        cur_tpl = []
-        cur_rec = []
-        cur_bytes = 2  # []
-        for tpl, rec in zip(templates, template_records):
-            tpl_json = json.dumps(tpl, separators=(",", ":"))
-            item_bytes = len(tpl_json.encode("utf-8")) + 1
-            if cur_tpl and (
-                len(cur_tpl) >= MAX_MATCH_BATCH_ITEMS
-                or (cur_bytes + item_bytes) > MAX_MATCH_BATCH_BYTES
-            ):
-                batches.append((cur_tpl, cur_rec))
-                cur_tpl = []
-                cur_rec = []
-                cur_bytes = 2
-            cur_tpl.append(tpl)
-            cur_rec.append(rec)
-            cur_bytes += item_bytes
-        if cur_tpl:
-            batches.append((cur_tpl, cur_rec))
 
-        global_best_score = float("-inf")
-        global_best_rec = None
-        global_threshold = 0.0
-        global_quality = 0.0
-        global_quality_threshold = 0.0
-        global_tier = "reject"
-        global_algorithm = "akaze_v2"
-        global_query_rotation = 0
-        global_query_variants = 0
-        batch_failures = 0
-        last_batch_error = ""
+        # --- Run quality / fingerprint check then match entirely in-process ---
+        img = _local_fp_v2.read_image(img_bytes)
 
-        for tpl_batch, rec_batch in batches:
-            data = {"templates": json.dumps(tpl_batch, separators=(",", ":"))}
-            try:
-                payload = await _post_model_service("/fingerprint_v2/match", files=files, data=data)
-            except HTTPException as e:
-                batch_failures += 1
-                last_batch_error = str(e.detail)
-                # Fallback to in-process matcher for resilience.
-                try:
-                    payload = _local_match_payload(img_bytes, tpl_batch, fallback_detail=last_batch_error)
-                except Exception as inner:
-                    last_batch_error = f"{last_batch_error}; fallback_error={inner}"
-                    continue
-            except Exception as e:
-                # Defensive fallback for unexpected transport/parsing failures.
-                batch_failures += 1
-                last_batch_error = str(e)
-                try:
-                    payload = _local_match_payload(img_bytes, tpl_batch, fallback_detail=last_batch_error)
-                except Exception as inner:
-                    last_batch_error = f"{last_batch_error}; fallback_error={inner}"
-                    continue
-
-            if not isinstance(payload, dict):
-                batch_failures += 1
-                last_batch_error = f"Unexpected model payload type: {type(payload).__name__}"
-                continue
-
-            tier = payload.get("tier", "reject")
-            if tier in {"reject_non_fingerprint", "reject_quality"}:
-                return {
-                    "matched": False,
-                    "person_id": None,
-                    "full_name": None,
-                    "similarity": 0.0,
-                    "threshold": _safe_float(payload.get("threshold", 0.0), 0.0),
-                    "quality_score": _safe_float(payload.get("quality_score", 0.0), 0.0),
-                    "quality_threshold": _safe_float(payload.get("quality_threshold", 0.0), 0.0),
-                    "likeness_score": _safe_float(payload.get("likeness_score", 0.0), 0.0),
-                    "reasons": payload.get("reasons", []),
-                    "likeness_components": payload.get("likeness_components", {}),
-                    "tier": tier,
-                    "algorithm": payload.get("algorithm", "akaze_v2"),
-                    "finger_label": finger_label or None,
-                }
-
-            score = _safe_float(payload.get("score", 0.0), 0.0)
-            best_index = payload.get("best_index")
-            if isinstance(best_index, int) and 0 <= best_index < len(rec_batch):
-                if score > global_best_score:
-                    global_best_score = score
-                    global_best_rec = rec_batch[best_index]
-                    global_threshold = _safe_float(payload.get("threshold", 0.0), 0.0)
-                    global_quality = _safe_float(payload.get("quality_score", 0.0), 0.0)
-                    global_quality_threshold = _safe_float(payload.get("quality_threshold", 0.0), 0.0)
-                    global_tier = tier
-                    global_algorithm = payload.get("algorithm", "akaze_v2")
-                    global_query_rotation = _safe_int(payload.get("query_rotation_deg", 0), 0)
-                    global_query_variants = _safe_int(payload.get("query_variants", 0), 0)
-
-        if global_best_rec is None:
-            if batch_failures and batch_failures == len(batches):
-                return {
-                    "matched": False,
-                    "person_id": None,
-                    "full_name": None,
-                    "similarity": 0.0,
-                    "tier": "model_batch_error",
-                    "detail": last_batch_error or "Match service batch processing failed",
-                }
+        likeness = _local_fp_v2.fingerprint_likeness_components(img)
+        like_score = _safe_float(likeness.get("score", 0.0), 0.0)
+        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58)
+        if like_score < likeness_threshold:
             return {
                 "matched": False,
                 "person_id": None,
                 "full_name": None,
-                "similarity": max(0.0, global_best_score) if global_best_score != float("-inf") else 0.0,
-                "tier": "no_match",
+                "similarity": 0.0,
+                "likeness_score": like_score,
+                "likeness_threshold": likeness_threshold,
+                "likeness_components": likeness,
+                "reasons": ["low_likeness_score"],
+                "tier": "reject_non_fingerprint",
+                "algorithm": "akaze_v2",
+                "finger_label": finger_label or None,
             }
 
-        matched = global_best_score >= global_threshold
-        rec = global_best_rec
-        person_id = rec.get("person_id") if rec else None
+        quality = _safe_float(_local_fp_v2.quality_score(img), 0.0)
+        quality_threshold = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.30)
+        if quality < quality_threshold:
+            return {
+                "matched": False,
+                "person_id": None,
+                "full_name": None,
+                "similarity": 0.0,
+                "quality_score": quality,
+                "quality_threshold": quality_threshold,
+                "reasons": ["low_quality_fingerprint_image"],
+                "tier": "reject_quality",
+                "algorithm": "akaze_v2",
+                "finger_label": finger_label or None,
+            }
+
+        # Extract rotation-tolerant query variants (±12°/±6°/0°) — same as model-service.
+        query_variants = _extract_query_variants(img)
+        if not query_variants:
+            return {
+                "matched": False,
+                "person_id": None,
+                "full_name": None,
+                "similarity": 0.0,
+                "quality_score": quality,
+                "quality_threshold": quality_threshold,
+                "reasons": ["insufficient_keypoints"],
+                "tier": "reject_quality",
+                "algorithm": "akaze_v2",
+                "finger_label": finger_label or None,
+            }
+
+        threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18)
+
+        # Match each stored template against all rotation variants — pick global best.
+        best_score = float("-inf")
+        best_rec = None
+        best_rotation = 0
+        for r in template_records:
+            raw_tpl = r.get("template")
+            tpl = _deserialize_tpl(raw_tpl)
+            if tpl is None:
+                continue
+            for q_tpl in query_variants:
+                try:
+                    s = _safe_float(_local_fp_v2.match_score(q_tpl, tpl), 0.0)
+                except Exception:
+                    continue
+                if s > best_score:
+                    best_score = s
+                    best_rec = r
+
+        if best_rec is None:
+            return {
+                "matched": False,
+                "person_id": None,
+                "full_name": None,
+                "similarity": 0.0,
+                "quality_score": quality,
+                "quality_threshold": quality_threshold,
+                "likeness_score": like_score,
+                "threshold": threshold,
+                "tier": "no_match",
+                "algorithm": "akaze_v2",
+            }
+
+        best_score = max(0.0, best_score)
+        matched = best_score >= threshold
+        person_id = best_rec.get("person_id")
         person = pmap.get(person_id, {}) if person_id else {}
 
         return {
@@ -454,15 +459,16 @@ async def match_fingerprint_v2(
             "candidate_person_id": person_id,
             "full_name": person.get("full_name") if (matched and person) else None,
             "candidate_full_name": person.get("full_name") if person else None,
-            "similarity": max(0.0, global_best_score),
-            "threshold": global_threshold,
-            "quality_score": global_quality,
-            "quality_threshold": global_quality_threshold,
-            "tier": "auto" if matched else (global_tier or "reject_low_similarity"),
-            "algorithm": global_algorithm,
-            "finger_label": rec.get("finger_label") if rec else (finger_label or None),
-            "query_rotation_deg": global_query_rotation,
-            "query_variants": global_query_variants,
+            "similarity": best_score,
+            "threshold": threshold,
+            "quality_score": quality,
+            "quality_threshold": quality_threshold,
+            "likeness_score": like_score,
+            "likeness_threshold": likeness_threshold,
+            "tier": "auto" if matched else "reject_low_similarity",
+            "algorithm": "akaze_v2",
+            "finger_label": best_rec.get("finger_label") or (finger_label or None),
+            "query_variants": len(query_variants),
         }
     except HTTPException:
         raise

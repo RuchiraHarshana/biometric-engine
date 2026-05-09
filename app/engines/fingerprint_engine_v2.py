@@ -11,7 +11,7 @@ class FingerprintEngineV2:
     def __init__(self):
         self.detector = cv2.AKAZE_create()
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        self.max_template_keypoints = 400
+        self.max_template_keypoints = 200
 
     def _channel_quality(self, ch: np.ndarray) -> float:
         edges = cv2.Canny(ch, 45, 140)
