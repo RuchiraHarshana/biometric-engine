@@ -5,12 +5,62 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth.dependencies import require_register_access, require_verify_access
 from app.core.config import MODEL_SERVICE_TIMEOUT, MODEL_SERVICE_URL
+from app.engines.fingerprint_engine_v2 import FingerprintEngineV2
 from app.storage.supabase_client import client as sb
 
 
 router_fp_v2 = APIRouter()
 MAX_MATCH_BATCH_BYTES = 6 * 1024 * 1024
 MAX_MATCH_BATCH_ITEMS = 120
+_backend_fp_v2 = FingerprintEngineV2()
+
+
+def _backend_v2_enroll_guard(img_bytes: bytes) -> tuple[bool, list[str], dict]:
+    """Local backend guard to prevent obvious non-fingerprint enrolls."""
+    try:
+        img = _backend_fp_v2.read_image(img_bytes)
+        likeness = _backend_fp_v2.fingerprint_likeness_components(img)
+        quality = float(_backend_fp_v2.quality_score(img))
+    except Exception:
+        return False, ["invalid_image_decode"], {}
+
+    reasons = []
+    score = float(likeness.get("score", 0.0))
+    coverage = float(likeness.get("coverage", 0.0))
+    kp_count = int(likeness.get("kp_count", 0))
+    edge_count = int(likeness.get("edge_component_count", 0))
+    largest_ratio = float(likeness.get("largest_edge_component_ratio", 1.0))
+    line_count = int(likeness.get("line_count", 0))
+    circle_count = int(likeness.get("circle_count", 0))
+
+    if score < 0.45:
+        reasons.append("low_likeness_score_backend")
+    if quality < 0.28:
+        reasons.append("low_quality_backend")
+    if coverage < 0.10:
+        reasons.append("low_coverage_backend")
+    if kp_count < 20:
+        reasons.append("low_keypoints_backend")
+    if edge_count < 25:
+        reasons.append("sparse_edges_backend")
+    if largest_ratio > 0.55:
+        reasons.append("dominant_stroke_backend")
+    if line_count >= 3:
+        reasons.append("diagram_lines_backend")
+    if circle_count >= 1:
+        reasons.append("diagram_circles_backend")
+
+    metrics = {
+        "score": score,
+        "quality": quality,
+        "coverage": coverage,
+        "kp_count": kp_count,
+        "edge_component_count": edge_count,
+        "largest_edge_component_ratio": largest_ratio,
+        "line_count": line_count,
+        "circle_count": circle_count,
+    }
+    return len(reasons) == 0, reasons, metrics
 
 
 def _v2_table_help() -> str:
@@ -55,6 +105,16 @@ async def enroll_fingerprint_v2(
 ):
     try:
         img_bytes = await image.read()
+        ok_guard, guard_reasons, guard_metrics = _backend_v2_enroll_guard(img_bytes)
+        if not ok_guard:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Fingerprint V2 backend guard rejected image as non-fingerprint. "
+                    f"reasons={guard_reasons}, metrics={guard_metrics}"
+                ),
+            )
+
         files = {
             "image": (
                 image.filename or "fingerprint.jpg",
