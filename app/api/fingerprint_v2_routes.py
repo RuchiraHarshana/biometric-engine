@@ -15,6 +15,24 @@ MAX_MATCH_BATCH_BYTES = 6 * 1024 * 1024
 MAX_MATCH_BATCH_ITEMS = 120
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value is None:
+            return int(default)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
 def _normalize_fingerprint_upload(img_bytes: bytes, max_dim: int = 1200) -> bytes:
     """Normalize large uploads to keep inference latency and payload size bounded."""
     try:
@@ -255,6 +273,11 @@ async def match_fingerprint_v2(
                 last_batch_error = str(e.detail)
                 continue
 
+            if not isinstance(payload, dict):
+                batch_failures += 1
+                last_batch_error = f"Unexpected model payload type: {type(payload).__name__}"
+                continue
+
             tier = payload.get("tier", "reject")
             if tier in {"reject_non_fingerprint", "reject_quality"}:
                 return {
@@ -262,10 +285,10 @@ async def match_fingerprint_v2(
                     "person_id": None,
                     "full_name": None,
                     "similarity": 0.0,
-                    "threshold": float(payload.get("threshold", 0.0)),
-                    "quality_score": float(payload.get("quality_score", 0.0)),
-                    "quality_threshold": float(payload.get("quality_threshold", 0.0)),
-                    "likeness_score": float(payload.get("likeness_score", 0.0)),
+                    "threshold": _safe_float(payload.get("threshold", 0.0), 0.0),
+                    "quality_score": _safe_float(payload.get("quality_score", 0.0), 0.0),
+                    "quality_threshold": _safe_float(payload.get("quality_threshold", 0.0), 0.0),
+                    "likeness_score": _safe_float(payload.get("likeness_score", 0.0), 0.0),
                     "reasons": payload.get("reasons", []),
                     "likeness_components": payload.get("likeness_components", {}),
                     "tier": tier,
@@ -273,19 +296,19 @@ async def match_fingerprint_v2(
                     "finger_label": finger_label or None,
                 }
 
-            score = float(payload.get("score", 0.0))
+            score = _safe_float(payload.get("score", 0.0), 0.0)
             best_index = payload.get("best_index")
             if isinstance(best_index, int) and 0 <= best_index < len(rec_batch):
                 if score > global_best_score:
                     global_best_score = score
                     global_best_rec = rec_batch[best_index]
-                    global_threshold = float(payload.get("threshold", 0.0))
-                    global_quality = float(payload.get("quality_score", 0.0))
-                    global_quality_threshold = float(payload.get("quality_threshold", 0.0))
+                    global_threshold = _safe_float(payload.get("threshold", 0.0), 0.0)
+                    global_quality = _safe_float(payload.get("quality_score", 0.0), 0.0)
+                    global_quality_threshold = _safe_float(payload.get("quality_threshold", 0.0), 0.0)
                     global_tier = tier
                     global_algorithm = payload.get("algorithm", "akaze_v2")
-                    global_query_rotation = int(payload.get("query_rotation_deg", 0))
-                    global_query_variants = int(payload.get("query_variants", 0))
+                    global_query_rotation = _safe_int(payload.get("query_rotation_deg", 0), 0)
+                    global_query_variants = _safe_int(payload.get("query_variants", 0), 0)
 
         if global_best_rec is None:
             if batch_failures and batch_failures == len(batches):
@@ -329,4 +352,12 @@ async def match_fingerprint_v2(
     except Exception as e:
         if _is_missing_table_error(e):
             raise HTTPException(status_code=500, detail=_v2_table_help())
-        raise HTTPException(status_code=500, detail=f"Match fingerprint v2 failed: {e}")
+        # Return a structured failure instead of 500 to avoid opaque frontend fetch errors.
+        return {
+            "matched": False,
+            "person_id": None,
+            "full_name": None,
+            "similarity": 0.0,
+            "tier": "match_internal_error",
+            "detail": f"Match fingerprint v2 failed: {e}",
+        }
