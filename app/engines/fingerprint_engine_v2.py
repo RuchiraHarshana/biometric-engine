@@ -176,7 +176,7 @@ class FingerprintEngineV2:
     def extract_template(self, img_gray: np.ndarray) -> dict:
         proc = self.preprocess(img_gray)
         kps, des = self.detector.detectAndCompute(proc, None)
-        if des is None or len(kps) < 20:
+        if des is None or len(kps) < 30:
             raise ValueError("Fingerprint features not found. Use a clearer image.")
 
         kp_coords = [[float(p.pt[0]), float(p.pt[1])] for p in kps]

@@ -34,7 +34,33 @@ fp_engine_v2 = FingerprintEngineV2()
 FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
 FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.35"))
 FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.20"))
-FINGERPRINT_V2_LIKENESS_THRESHOLD = float(os.getenv("FINGERPRINT_V2_LIKENESS_THRESHOLD", "0.42"))
+FINGERPRINT_V2_LIKENESS_THRESHOLD = float(os.getenv("FINGERPRINT_V2_LIKENESS_THRESHOLD", "0.60"))
+FINGERPRINT_V2_MIN_COVERAGE = float(os.getenv("FINGERPRINT_V2_MIN_COVERAGE", "0.16"))
+FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY = float(os.getenv("FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY", "0.58"))
+FINGERPRINT_V2_MIN_KP_COUNT = int(os.getenv("FINGERPRINT_V2_MIN_KP_COUNT", "35"))
+FINGERPRINT_V2_MIN_KP_SPREAD = float(os.getenv("FINGERPRINT_V2_MIN_KP_SPREAD", "0.12"))
+
+
+def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
+    score = float(likeness.get("score", 0.0))
+    coverage = float(likeness.get("coverage", 0.0))
+    entropy = float(likeness.get("orientation_entropy", 0.0))
+    kp_count = int(likeness.get("kp_count", 0))
+    kp_spread = float(likeness.get("kp_spread", 0.0))
+
+    reasons = []
+    if score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
+        reasons.append("low_likeness_score")
+    if coverage < FINGERPRINT_V2_MIN_COVERAGE:
+        reasons.append("low_coverage")
+    if entropy < FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY:
+        reasons.append("low_orientation_entropy")
+    if kp_count < FINGERPRINT_V2_MIN_KP_COUNT:
+        reasons.append("low_keypoint_count")
+    if kp_spread < FINGERPRINT_V2_MIN_KP_SPREAD:
+        reasons.append("low_keypoint_spread")
+
+    return len(reasons) == 0, reasons
 
 
 async def _read_form_upload(request: Request, field: str = "image"):
@@ -160,11 +186,17 @@ async def fingerprint_template_v2(request: Request):
         # Dedicated v2 fingerprint-likeness gate designed to reject drawings/diagrams.
         likeness = fp_engine_v2.fingerprint_likeness_components(img)
         like_score = float(likeness.get("score", 0.0))
-        if like_score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
+        ok_like, like_reasons = _v2_likeness_verdict(likeness)
+        if not ok_like:
             return {
                 "error": "Image does not appear to be a fingerprint.",
                 "likeness_score": like_score,
                 "likeness_threshold": FINGERPRINT_V2_LIKENESS_THRESHOLD,
+                "min_coverage": FINGERPRINT_V2_MIN_COVERAGE,
+                "min_orientation_entropy": FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY,
+                "min_kp_count": FINGERPRINT_V2_MIN_KP_COUNT,
+                "min_kp_spread": FINGERPRINT_V2_MIN_KP_SPREAD,
+                "reasons": like_reasons,
                 "likeness_components": likeness,
             }
 
@@ -211,7 +243,8 @@ async def fingerprint_match_v2(request: Request):
         # Gate 1 — dedicated v2 fingerprint-likeness detector.
         likeness = fp_engine_v2.fingerprint_likeness_components(img)
         like_score = float(likeness.get("score", 0.0))
-        if like_score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
+        ok_like, like_reasons = _v2_likeness_verdict(likeness)
+        if not ok_like:
             return {
                 "best_index": None,
                 "score": 0.0,
@@ -219,6 +252,11 @@ async def fingerprint_match_v2(request: Request):
                 "tier": "reject_non_fingerprint",
                 "likeness_score": like_score,
                 "likeness_threshold": FINGERPRINT_V2_LIKENESS_THRESHOLD,
+                "min_coverage": FINGERPRINT_V2_MIN_COVERAGE,
+                "min_orientation_entropy": FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY,
+                "min_kp_count": FINGERPRINT_V2_MIN_KP_COUNT,
+                "min_kp_spread": FINGERPRINT_V2_MIN_KP_SPREAD,
+                "reasons": like_reasons,
                 "likeness_components": likeness,
             }
 
