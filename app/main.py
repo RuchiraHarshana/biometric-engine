@@ -37,12 +37,16 @@ def _build_cors_origins() -> list[str]:
 
 
 cors_origins = _build_cors_origins()
+cors_allow_all = os.getenv("CORS_ALLOW_ALL", "true").lower() in ("1", "true", "yes")
+cors_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https?://.*")
 
 # ✅ CORS (fixes browser preflight OPTIONS requests)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"] if cors_allow_all else cors_origins,
+    allow_origin_regex=cors_origin_regex if not cors_allow_all else None,
+    # With wildcard origins, credentials must be disabled by spec.
+    allow_credentials=not cors_allow_all,
     allow_methods=["*"],   # allows OPTIONS, GET, POST, etc.
     allow_headers=["*"],
 )
