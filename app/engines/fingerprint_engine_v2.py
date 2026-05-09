@@ -11,6 +11,7 @@ class FingerprintEngineV2:
     def __init__(self):
         self.detector = cv2.AKAZE_create()
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        self.max_template_keypoints = 400
 
     def _channel_quality(self, ch: np.ndarray) -> float:
         edges = cv2.Canny(ch, 45, 140)
@@ -328,6 +329,12 @@ class FingerprintEngineV2:
         kps, des = self.detector.detectAndCompute(proc, None)
         if des is None or len(kps) < 30:
             raise ValueError("Fingerprint features not found. Use a clearer image.")
+
+        # Cap template size to keep API/database payloads stable in production.
+        if len(kps) > self.max_template_keypoints:
+            idx = np.argsort([-float(k.response) for k in kps])[: self.max_template_keypoints]
+            des = des[idx]
+            kps = [kps[int(i)] for i in idx]
 
         kp_coords = [[float(p.pt[0]), float(p.pt[1])] for p in kps]
         return {
