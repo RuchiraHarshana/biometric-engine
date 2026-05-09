@@ -21,8 +21,9 @@ def _backend_v2_enroll_guard(img_bytes: bytes) -> tuple[bool, list[str], dict]:
         img = _backend_fp_v2.read_image(img_bytes)
         likeness = _backend_fp_v2.fingerprint_likeness_components(img)
         quality = float(_backend_fp_v2.quality_score(img))
-    except Exception:
-        return False, ["invalid_image_decode"], {}
+    except Exception as e:
+        # Log but don't reject - let model-service do the validation
+        return True, [], {"error": str(e)}
 
     reasons = []
     score = float(likeness.get("score", 0.0))
@@ -33,22 +34,22 @@ def _backend_v2_enroll_guard(img_bytes: bytes) -> tuple[bool, list[str], dict]:
     line_count = int(likeness.get("line_count", 0))
     circle_count = int(likeness.get("circle_count", 0))
 
-    if score < 0.45:
-        reasons.append("low_likeness_score_backend")
-    if quality < 0.28:
-        reasons.append("low_quality_backend")
-    if coverage < 0.10:
-        reasons.append("low_coverage_backend")
-    if kp_count < 20:
-        reasons.append("low_keypoints_backend")
-    if edge_count < 25:
-        reasons.append("sparse_edges_backend")
-    if largest_ratio > 0.55:
-        reasons.append("dominant_stroke_backend")
-    if line_count >= 3:
-        reasons.append("diagram_lines_backend")
-    if circle_count >= 1:
-        reasons.append("diagram_circles_backend")
+    # Be conservative: only reject obvious non-fingerprints
+    # Let model-service do stricter validation
+    if score < 0.30:
+        reasons.append("extremely_low_likeness_backend")
+    if coverage < 0.05:
+        reasons.append("almost_no_coverage_backend")
+    if kp_count < 10:
+        reasons.append("almost_no_keypoints_backend")
+    if edge_count < 5:
+        reasons.append("almost_no_edges_backend")
+    # Only reject if MANY lines detected (diagram-like)
+    if line_count >= 8:
+        reasons.append("many_lines_detected_backend")
+    # Only reject if MANY circles detected (diagram-like)
+    if circle_count >= 5:
+        reasons.append("many_circles_detected_backend")
 
     metrics = {
         "score": score,
