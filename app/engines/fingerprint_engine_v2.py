@@ -61,7 +61,7 @@ _PERIOD_CV_MAX  = 0.35        # ridge period coefficient of variation gate
 
 
 class FingerprintEngineV2:
-    """Production-grade hybrid fingerprint engine (hybrid_v1)."""
+    """Production-grade hybrid fingerprint engine (hybrid_v2)."""
 
     def __init__(self):
         self._gabor_fine   = self._build_gabor_bank(sigma=3.0, lambd=8.0)
@@ -164,7 +164,7 @@ class FingerprintEngineV2:
     def _reject(self, likeness_val: float, gate: str = "") -> dict:
         return {
             "template":       {"minutiae": [], "width": _W, "height": _H,
-                               "count": 0, "algorithm": "hybrid_v1",
+                               "count": 0, "algorithm": "hybrid_v2",
                                "ridge_period": 0.0, "coherence": 0.0},
             "quality":        0.0,
             "likeness":       float(max(0.0, min(0.39, likeness_val))),
@@ -181,7 +181,7 @@ class FingerprintEngineV2:
             "width":        _W,
             "height":       _H,
             "count":        len(minutiae),
-            "algorithm":    "hybrid_v1",
+            "algorithm":    "hybrid_v2",
             "ridge_period": float(ridge_period),
             "coherence":    float(coherence),
         }
@@ -442,7 +442,7 @@ class FingerprintEngineV2:
     # -- LAYER 4: Matching -----------------------------------------------------
 
     def match_score(self, tpl_a: dict, tpl_b: dict) -> float:
-        """Match two templates. Handles hybrid_v1, minutiae_v1, legacy AKAZE."""
+        """Match two templates. Handles hybrid_v2, hybrid_v1, minutiae_v1, legacy AKAZE."""
         if "des" in tpl_a and "des" in tpl_b:
             return self._akaze_match(tpl_a, tpl_b)
         if "minutiae" not in tpl_a or "minutiae" not in tpl_b:
@@ -453,9 +453,18 @@ class FingerprintEngineV2:
         if len(m_a) < 4 or len(m_b) < 4:
             return 0.0
 
+        alg_a = tpl_a.get("algorithm", "")
+        alg_b = tpl_b.get("algorithm", "")
+
+        # Version mismatch: hybrid_v1 templates are incompatible with hybrid_v2
+        # (ink-scan pre-blur changes minutiae coordinates).  Signal re-enroll.
+        if ("hybrid_v2" in (alg_a, alg_b)) and ("hybrid_v1" in (alg_a, alg_b)):
+            log.warning("Template version mismatch: %s vs %s — re-enroll needed", alg_a, alg_b)
+            raise ValueError(f"STALE_TEMPLATE:{alg_a}:{alg_b}")
+
         # Step A: pre-filter on ridge_period and coherence
-        if (tpl_a.get("algorithm") in ("hybrid_v1", "minutiae_v1") and
-                tpl_b.get("algorithm") in ("hybrid_v1", "minutiae_v1")):
+        if (alg_a in ("hybrid_v1", "hybrid_v2", "minutiae_v1") and
+                alg_b in ("hybrid_v1", "hybrid_v2", "minutiae_v1")):
             rp_a = tpl_a.get("ridge_period", 0.0)
             rp_b = tpl_b.get("ridge_period", 0.0)
             if rp_a > 0 and rp_b > 0:
@@ -489,10 +498,11 @@ class FingerprintEngineV2:
                 if count < 4:
                     continue
                 nbc = self._neighborhood_consistency(arr_a, arr_b, pairs)
-                q_sum = sum(arr_a[p[0], 4] + arr_b[p[1], 4] for p in pairs)
-                weight = max(0.5, q_sum / (2.0 * count + 1e-6))
                 raw = float(count) / math.sqrt(max(1, na) * max(1, nb))
-                score = raw * weight * (0.5 + 0.5 * nbc)
+                # Simpler formula: nbc is neighbourhood consistency (0-1).
+                # Removing the quality-weight multiplier which was over-penalising
+                # genuine matches that happen to have moderate minutia quality.
+                score = raw * (0.5 + 0.5 * nbc)
                 if score > best_score:
                     best_score = score
 
