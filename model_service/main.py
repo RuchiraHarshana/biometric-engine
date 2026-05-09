@@ -31,16 +31,43 @@ def get_face_engine() -> FaceEngineONNX:
 
 fp_engine = FingerprintEngine()
 fp_engine_v2 = FingerprintEngineV2()
+def _env_float_floor(name: str, default: float, floor: float) -> float:
+    raw = os.getenv(name)
+    try:
+        v = float(raw) if raw is not None else float(default)
+    except Exception:
+        v = float(default)
+    return max(v, floor)
+
+
+def _env_int_floor(name: str, default: int, floor: int) -> int:
+    raw = os.getenv(name)
+    try:
+        v = int(raw) if raw is not None else int(default)
+    except Exception:
+        v = int(default)
+    return max(v, floor)
+
+
+def _env_float_ceil(name: str, default: float, ceil: float) -> float:
+    raw = os.getenv(name)
+    try:
+        v = float(raw) if raw is not None else float(default)
+    except Exception:
+        v = float(default)
+    return min(v, ceil)
+
+
 FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
-FINGERPRINT_V2_QUALITY_THRESHOLD = float(os.getenv("FINGERPRINT_V2_QUALITY_THRESHOLD", "0.35"))
+FINGERPRINT_V2_QUALITY_THRESHOLD = _env_float_floor("FINGERPRINT_V2_QUALITY_THRESHOLD", 0.35, 0.35)
 FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.20"))
-FINGERPRINT_V2_LIKENESS_THRESHOLD = float(os.getenv("FINGERPRINT_V2_LIKENESS_THRESHOLD", "0.60"))
-FINGERPRINT_V2_MIN_COVERAGE = float(os.getenv("FINGERPRINT_V2_MIN_COVERAGE", "0.16"))
-FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY = float(os.getenv("FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY", "0.58"))
-FINGERPRINT_V2_MIN_KP_COUNT = int(os.getenv("FINGERPRINT_V2_MIN_KP_COUNT", "35"))
-FINGERPRINT_V2_MIN_KP_SPREAD = float(os.getenv("FINGERPRINT_V2_MIN_KP_SPREAD", "0.12"))
-FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = float(os.getenv("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", "0.32"))
-FINGERPRINT_V2_MAX_TILE_COVERAGE_STD = float(os.getenv("FINGERPRINT_V2_MAX_TILE_COVERAGE_STD", "0.24"))
+FINGERPRINT_V2_LIKENESS_THRESHOLD = _env_float_floor("FINGERPRINT_V2_LIKENESS_THRESHOLD", 0.60, 0.60)
+FINGERPRINT_V2_MIN_COVERAGE = _env_float_floor("FINGERPRINT_V2_MIN_COVERAGE", 0.16, 0.16)
+FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY = _env_float_floor("FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY", 0.58, 0.58)
+FINGERPRINT_V2_MIN_KP_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_KP_COUNT", 35, 35)
+FINGERPRINT_V2_MIN_KP_SPREAD = _env_float_floor("FINGERPRINT_V2_MIN_KP_SPREAD", 0.12, 0.12)
+FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", 0.32, 0.32)
+FINGERPRINT_V2_MAX_TILE_COVERAGE_STD = _env_float_ceil("FINGERPRINT_V2_MAX_TILE_COVERAGE_STD", 0.24, 0.24)
 
 
 def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
