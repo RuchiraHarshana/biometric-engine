@@ -2,6 +2,7 @@ import json
 import os
 from typing import Optional
 
+import cv2
 import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 
@@ -73,6 +74,27 @@ FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO = _env_float_ceil("FINGERPRINT_V
 FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO", 0.20, 0.20)
 FINGERPRINT_V2_MIN_MEAN_PERIODICITY = _env_float_floor("FINGERPRINT_V2_MIN_MEAN_PERIODICITY", 4.5, 4.5)
 FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO", 0.12, 0.12)
+FINGERPRINT_V2_MATCH_ROTATIONS = tuple(int(x) for x in os.getenv("FINGERPRINT_V2_MATCH_ROTATIONS", "-12,-6,0,6,12").split(",") if x.strip())
+
+
+def _rotate_gray(img: np.ndarray, angle_deg: float) -> np.ndarray:
+    h, w = img.shape[:2]
+    c = (w / 2.0, h / 2.0)
+    m = cv2.getRotationMatrix2D(c, angle_deg, 1.0)
+    return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def _extract_v2_query_templates(img: np.ndarray) -> list[tuple[dict, int]]:
+    """Build rotation-tolerant query templates for stable same-finger matching."""
+    variants: list[tuple[dict, int]] = []
+    for ang in FINGERPRINT_V2_MATCH_ROTATIONS:
+        try:
+            view = img if ang == 0 else _rotate_gray(img, float(ang))
+            tpl = fp_engine_v2.extract_template(view)
+            variants.append((tpl, int(ang)))
+        except Exception:
+            continue
+    return variants
 
 
 def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
@@ -119,6 +141,10 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     )
     if weak_periodicity and (coverage < 0.18 or edge_component_count < 60):
         reasons.append("weak_ridge_periodicity_with_sparse_structure")
+
+    # Hard reject for obvious non-fingerprint structure.
+    if coverage < 0.06 and kp_count < 18 and edge_component_count < 25:
+        reasons.append("obvious_non_fingerprint_sparse_signal")
 
     # Consensus gate: a valid fingerprint should satisfy most core structure signals.
     core_failures = 0
@@ -297,6 +323,9 @@ async def fingerprint_template_v2(request: Request):
                 "error": "Fingerprint image quality too low. Please use a clearer, well-lit image.",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "reasons": ["low_quality_fingerprint_image"],
+                "likeness_score": like_score,
+                "likeness_components": likeness,
             }
 
         template = fp_engine_v2.extract_template(img)
@@ -367,17 +396,37 @@ async def fingerprint_match_v2(request: Request):
                 "tier": "reject_quality",
                 "quality_score": quality,
                 "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "reasons": ["low_quality_fingerprint_image"],
             }
 
-        query_tpl = fp_engine_v2.extract_template(img)
+        query_tpl_variants = _extract_v2_query_templates(img)
+        if not query_tpl_variants:
+            return {
+                "best_index": None,
+                "score": 0.0,
+                "matched": False,
+                "tier": "reject_quality",
+                "quality_score": quality,
+                "quality_threshold": FINGERPRINT_V2_QUALITY_THRESHOLD,
+                "reasons": ["insufficient_fingerprint_features"],
+            }
 
         best_index = None
         best_score = float("-inf")
+        best_rotation = 0
         for i, tpl in enumerate(tpl_list):
-            score = fp_engine_v2.match_score(query_tpl, tpl)
+            local_best = float("-inf")
+            local_rot = 0
+            for q_tpl, rot in query_tpl_variants:
+                score = fp_engine_v2.match_score(q_tpl, tpl)
+                if score > local_best:
+                    local_best = score
+                    local_rot = rot
+            score = local_best
             if score > best_score:
                 best_score = score
                 best_index = i
+                best_rotation = local_rot
 
         if best_index is None:
             return {
@@ -404,6 +453,8 @@ async def fingerprint_match_v2(request: Request):
             "likeness_components": likeness,
             "threshold": FINGERPRINT_V2_THRESHOLD,
             "algorithm": "akaze_v2",
+            "query_rotation_deg": int(best_rotation),
+            "query_variants": len(query_tpl_variants),
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

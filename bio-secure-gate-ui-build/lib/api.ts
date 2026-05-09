@@ -50,15 +50,63 @@ async function authFetch(url: string, init?: RequestInit) {
 }
 
 async function authFormPost(url: string, formData: FormData) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: authHeaders(),
-    body: formData,
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 45000)
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: authHeaders(),
+      body: formData,
+      signal: controller.signal,
+    })
+  } catch (err: any) {
+    clearTimeout(timer)
+    const msg = err?.name === "AbortError"
+      ? "Request timed out while uploading fingerprint image. Try a smaller/clearer image."
+      : "Network upload failed (Failed to fetch). Check internet/API availability and try again."
+    throw new Error(msg)
+  }
+  clearTimeout(timer)
   if (!res.ok) {
     await throwApiError(res)
   }
   return res.json()
+}
+
+async function normalizeFingerprintFile(file: File): Promise<File> {
+  if (!file.type.startsWith("image/")) {
+    return file
+  }
+
+  try {
+    const bitmap = await createImageBitmap(file)
+    const maxDim = 1200
+    const longest = Math.max(bitmap.width, bitmap.height)
+    const scale = longest > maxDim ? maxDim / longest : 1
+    const targetW = Math.max(1, Math.round(bitmap.width * scale))
+    const targetH = Math.max(1, Math.round(bitmap.height * scale))
+
+    const canvas = document.createElement("canvas")
+    canvas.width = targetW
+    canvas.height = targetH
+    const ctx = canvas.getContext("2d")
+    if (!ctx) {
+      return file
+    }
+    ctx.drawImage(bitmap, 0, 0, targetW, targetH)
+    bitmap.close()
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.9)
+    })
+    if (!blob) {
+      return file
+    }
+    return new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), { type: "image/jpeg" })
+  } catch {
+    return file
+  }
 }
 
 // --- Persons ---
@@ -108,9 +156,10 @@ export async function enrollFingerprint(
     finger_label?: string
   },
 ) {
+  const normalized = await normalizeFingerprintFile(file)
   const fd = new FormData()
   fd.append("person_id", personId)
-  fd.append("image", file)
+  fd.append("image", normalized)
   fd.append("capture_method", data?.capture_method || "image_upload")
   if (data?.finger_label) {
     fd.append("finger_label", data.finger_label)
@@ -135,8 +184,9 @@ export async function matchFace(file: File) {
 // --- Fingerprint Matching ---
 
 export async function matchFingerprint(file: File, opts?: { capture_method?: string; finger_label?: string }) {
+  const normalized = await normalizeFingerprintFile(file)
   const fd = new FormData()
-  fd.append("image", file)
+  fd.append("image", normalized)
   if (opts?.capture_method) {
     fd.append("capture_method", opts.capture_method)
   }

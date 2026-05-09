@@ -104,11 +104,13 @@ async def enroll_fingerprint_v2(
             fptxt = f"{fp_score:.2f}" if isinstance(fp_score, (int, float)) else "N/A"
             reasons = payload.get("reasons")
             rtxt = f", reasons={reasons}" if reasons else ""
+            likeness = payload.get("likeness_score")
+            ltxt = f", likeness_score={likeness:.2f}" if isinstance(likeness, (int, float)) else ""
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Fingerprint V2 validation failed: {payload.get('error', 'invalid image')}. "
-                    f"quality_score={qtxt}, fp_score={fptxt}{rtxt}. "
+                    f"quality_score={qtxt}, fp_score={fptxt}{ltxt}{rtxt}. "
                     f"Please use a clearer fingerprint image."
                 ),
             )
@@ -238,6 +240,8 @@ async def match_fingerprint_v2(
         global_quality_threshold = 0.0
         global_tier = "reject"
         global_algorithm = "akaze_v2"
+        global_query_rotation = 0
+        global_query_variants = 0
         batch_failures = 0
         last_batch_error = ""
 
@@ -261,6 +265,9 @@ async def match_fingerprint_v2(
                     "threshold": float(payload.get("threshold", 0.0)),
                     "quality_score": float(payload.get("quality_score", 0.0)),
                     "quality_threshold": float(payload.get("quality_threshold", 0.0)),
+                    "likeness_score": float(payload.get("likeness_score", 0.0)),
+                    "reasons": payload.get("reasons", []),
+                    "likeness_components": payload.get("likeness_components", {}),
                     "tier": tier,
                     "algorithm": payload.get("algorithm", "akaze_v2"),
                     "finger_label": finger_label or None,
@@ -277,6 +284,8 @@ async def match_fingerprint_v2(
                     global_quality_threshold = float(payload.get("quality_threshold", 0.0))
                     global_tier = tier
                     global_algorithm = payload.get("algorithm", "akaze_v2")
+                    global_query_rotation = int(payload.get("query_rotation_deg", 0))
+                    global_query_variants = int(payload.get("query_variants", 0))
 
         if global_best_rec is None:
             if batch_failures and batch_failures == len(batches):
@@ -312,6 +321,8 @@ async def match_fingerprint_v2(
             "tier": "auto" if matched else (global_tier or "reject_low_similarity"),
             "algorithm": global_algorithm,
             "finger_label": rec.get("finger_label") if rec else (finger_label or None),
+            "query_rotation_deg": global_query_rotation,
+            "query_variants": global_query_variants,
         }
     except HTTPException:
         raise
