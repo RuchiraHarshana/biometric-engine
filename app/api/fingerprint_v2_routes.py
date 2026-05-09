@@ -342,7 +342,7 @@ async def match_fingerprint_v2(
                 "likeness_score": like_score,
                 "threshold": threshold,
                 "tier": "no_match",
-                "algorithm": "akaze_v2",
+                "algorithm": "minutiae_v1",
             }
 
         best_score = max(0.0, best_score)

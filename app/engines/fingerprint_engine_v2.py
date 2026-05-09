@@ -68,42 +68,81 @@ class FingerprintEngineV2:
             raise ValueError("Cannot decode image bytes")
         return img
 
-    def analyze(self, img: np.ndarray) -> dict:
-        """Single-pass full pipeline. Returns template + quality + likeness in one call.
+    def _ridge_coherence(self, enhanced, mask):
+        """Mean local orientation coherence in foreground mask.
 
-        Fields returned:
-          template       â€“ dict ready for JSON storage in Supabase
-          quality        â€“ float 0-1
-          likeness       â€“ float 0-1 (how fingerprint-like the image is)
-          minutiae_count â€“ int
-          ridge_ratio    â€“ float (fraction of image with ridge structure)
+        Fingerprint ridges are locally parallel  -> coherence ~0.45-0.85.
+        Diagrams / photos have mixed directions  -> coherence ~0.05-0.25.
         """
+        if mask.sum() < 200:
+            return 0.0
+        f   = enhanced.astype(np.float32)
+        gx  = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3)
+        gy  = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)
+        Gxx = cv2.GaussianBlur(gx * gx, (11, 11), 2.0)
+        Gyy = cv2.GaussianBlur(gy * gy, (11, 11), 2.0)
+        Gxy = cv2.GaussianBlur(gx * gy, (11, 11), 2.0)
+        numer = np.sqrt((Gxx - Gyy) ** 2 + 4.0 * Gxy ** 2)
+        denom = Gxx + Gyy + 1e-6
+        coh   = numer / denom
+        return float(coh[mask].mean())
+
+    def analyze(self, img: np.ndarray) -> dict:
+        """Single-pass full pipeline. Returns template + quality + likeness."""
         gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         enhanced, mask = self._enhance_and_segment(gray)
+        ridge_ratio = float(mask.sum()) / max(1, mask.size)
+
+        def _reject(likeness_val: float) -> dict:
+            return {
+                "template":       {"minutiae": [], "width": _W, "height": _H, "count": 0, "algorithm": "minutiae_v1"},
+                "quality":        0.0,
+                "likeness":       float(max(0.0, min(0.39, likeness_val))),
+                "minutiae_count": 0,
+                "ridge_ratio":    ridge_ratio,
+            }
+
+        # Gate 1: mask coverage.
+        # Fingerprints fill 15-70% of image. Diagram on white paper fills <10%.
+        if ridge_ratio < 0.10:
+            return _reject(ridge_ratio * 0.5)
+
+        # Gate 2: ridge orientation coherence.
+        # Real fingerprints have parallel flowing ridges (coherence 0.45-0.85).
+        # Diagrams (boxes, text, arrows) have mixed directions (0.05-0.25).
+        # Face/skin photos have isotropic texture (0.10-0.30).
+        coherence = self._ridge_coherence(enhanced, mask)
+        if coherence < 0.30:
+            return _reject(coherence * 0.95)
+
+        # Passed structural gates - run full minutiae pipeline
         binary   = self._binarize(enhanced, mask)
         skeleton = self._thin(binary)
         orient   = self._orientation_map(enhanced)
         minutiae = self._extract_minutiae(skeleton, mask, orient)
         minutiae = self._deduplicate(minutiae)
+        count    = len(minutiae)
 
-        count       = len(minutiae)
-        ridge_ratio = float(mask.sum()) / max(1, mask.size)
-
-        # Likeness: non-fingerprint images produce 0-8 minutiae â†’ score near 0
+        # Gate 3: minimum minutiae count.
         if count < _MIN_MINUTIAE:
             likeness = count / _MIN_MINUTIAE * 0.44
-        else:
-            likeness = 0.44 + 0.56 * min(1.0, (count - _MIN_MINUTIAE) / 35.0)
+            quality  = count / _MIN_MINUTIAE * 0.30
+            return {
+                "template":       {"minutiae": minutiae, "width": _W, "height": _H, "count": count, "algorithm": "minutiae_v1"},
+                "quality":        float(quality),
+                "likeness":       float(likeness),
+                "minutiae_count": count,
+                "ridge_ratio":    ridge_ratio,
+            }
 
-        # Quality: good fingerprint = high count + good ridge coverage
-        if count < _MIN_MINUTIAE:
-            quality = max(0.0, count / _MIN_MINUTIAE * 0.38)
-        else:
-            quality = (0.65 * min(1.0, count / 50.0)
-                       + 0.35 * min(1.0, ridge_ratio / 0.22))
+        # All gates passed - compute final scores.
+        # Likeness blends coherence (structure) and minutiae richness (biology).
+        likeness = float(min(1.0, 0.5 * coherence + 0.5 * min(1.0, count / 50.0)))
+        likeness = max(0.44, likeness)   # floor: if we got here it IS a fingerprint
+        quality  = float(0.65 * min(1.0, count / 50.0) + 0.35 * min(1.0, ridge_ratio / 0.22))
 
         template = {
-            "minutiae": minutiae,   # list of [x, y, angle_deg, type]
+            "minutiae": minutiae,
             "width":    _W,
             "height":   _H,
             "count":    count,
@@ -111,10 +150,10 @@ class FingerprintEngineV2:
         }
         return {
             "template":       template,
-            "quality":        float(quality),
-            "likeness":       float(likeness),
+            "quality":        quality,
+            "likeness":       likeness,
             "minutiae_count": count,
-            "ridge_ratio":    float(ridge_ratio),
+            "ridge_ratio":    ridge_ratio,
         }
 
     # Legacy wrappers kept for compatibility with model_service and old route code
