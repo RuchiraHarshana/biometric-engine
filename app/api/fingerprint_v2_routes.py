@@ -200,6 +200,9 @@ async def match_fingerprint_v2(
         pmap = {p.get("person_id"): p for p in persons}
 
         img_bytes = await image.read()
+        if not img_bytes or len(img_bytes) == 0:
+            raise HTTPException(status_code=400, detail="Empty image file")
+        img_bytes = _normalize_fingerprint_upload(img_bytes)
         files = {
             "image": (
                 image.filename or "fingerprint.jpg",
@@ -235,10 +238,18 @@ async def match_fingerprint_v2(
         global_quality_threshold = 0.0
         global_tier = "reject"
         global_algorithm = "akaze_v2"
+        batch_failures = 0
+        last_batch_error = ""
 
         for tpl_batch, rec_batch in batches:
             data = {"templates": json.dumps(tpl_batch, separators=(",", ":"))}
-            payload = await _post_model_service("/fingerprint_v2/match", files=files, data=data)
+            try:
+                payload = await _post_model_service("/fingerprint_v2/match", files=files, data=data)
+            except HTTPException as e:
+                # Skip bad/transient model batches instead of failing the whole request.
+                batch_failures += 1
+                last_batch_error = str(e.detail)
+                continue
 
             tier = payload.get("tier", "reject")
             if tier in {"reject_non_fingerprint", "reject_quality"}:
@@ -268,6 +279,15 @@ async def match_fingerprint_v2(
                     global_algorithm = payload.get("algorithm", "akaze_v2")
 
         if global_best_rec is None:
+            if batch_failures and batch_failures == len(batches):
+                return {
+                    "matched": False,
+                    "person_id": None,
+                    "full_name": None,
+                    "similarity": 0.0,
+                    "tier": "model_batch_error",
+                    "detail": last_batch_error or "Match service batch processing failed",
+                }
             return {
                 "matched": False,
                 "person_id": None,
