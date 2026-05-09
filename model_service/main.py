@@ -132,14 +132,15 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
         reasons.append("low_core_fingerprint_signal")
 
     # Explicit non-fingerprint geometry veto.
-    if (line_count >= 2 or circle_count >= 1) and edge_component_count < 160:
+    # Only reject if we have MANY geometric primitives AND sparse edges
+    if (line_count >= 5 or circle_count >= 3) and edge_component_count < 100:
         reasons.append("diagram_like_geometric_primitives")
 
     # Composite anti-diagram vetoes. Keep these strict for sparse, line-drawing patterns
     # while avoiding false rejects on weak real captures.
-    if coverage < 0.10 and edge_component_count < 30:
+    if coverage < 0.05 and edge_component_count < 20:
         reasons.append("diagram_like_sparse_topology")
-    if largest_edge_component_ratio > 0.45 and edge_component_count < 40:
+    if largest_edge_component_ratio > 0.50 and edge_component_count < 30:
         reasons.append("diagram_like_dominant_stroke")
 
     return len(reasons) == 0, reasons
