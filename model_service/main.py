@@ -108,12 +108,15 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
         reasons.append("low_edge_component_count")
     if largest_edge_component_ratio > FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO:
         reasons.append("high_largest_edge_component_ratio")
-    if periodic_tile_ratio < FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO:
-        reasons.append("low_periodic_tile_ratio")
-    if mean_periodicity < FINGERPRINT_V2_MIN_MEAN_PERIODICITY:
-        reasons.append("low_mean_periodicity")
-    if ridge_block_ratio < FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO:
-        reasons.append("low_ridge_block_ratio")
+    # Periodicity signals are useful but can be weak on valid low-contrast captures.
+    # Do not reject on periodic metrics alone; require sparse global structure too.
+    weak_periodicity = (
+        periodic_tile_ratio < FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO
+        and mean_periodicity < FINGERPRINT_V2_MIN_MEAN_PERIODICITY
+        and ridge_block_ratio < FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO
+    )
+    if weak_periodicity and (coverage < 0.18 or edge_component_count < 60):
+        reasons.append("weak_ridge_periodicity_with_sparse_structure")
 
     # Composite anti-diagram vetoes. Keep these strict for sparse, line-drawing patterns
     # while avoiding false rejects on weak real captures.
