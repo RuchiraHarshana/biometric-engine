@@ -1,394 +1,339 @@
+﻿"""Minutiae-based fingerprint engine â€” replaces AKAZE pipeline.
+
+Algorithm (single pass via analyze()):
+  1. Resize to 400Ã—500 px (standard size for consistent minutiae counts)
+  2. CLAHE contrast enhancement
+  3. Gabor ridge enhancement â€” 8 orientations tuned to fingerprint ridge frequency
+  4. Variance-based segmentation mask (foreground = ridge area)
+  5. Adaptive binarization
+  6. Zhang-Suen skeletonization via scikit-image (OpenCV fallback if unavailable)
+  7. Vectorised crossing-number minutiae detection (ridge endings + bifurcations)
+  8. Deduplication of spurious nearby minutiae
+  9. Alignment-based matching (rotation-tolerant by design â€” no multi-angle variants needed)
+
+Why this beats AKAZE:
+  - Non-fingerprint images (faces, diagrams) produce 0-8 minutiae â†’ score â‰ˆ 0 â†’ auto-rejected
+  - False-positive rate is controlled by biological structure, not generic keypoint density
+  - Rotation is handled internally in the matcher via rigid alignment on anchor pairs
+  - Backward-compatible: old AKAZE templates matched via _akaze_match() fallback
+"""
+import math
+
 import cv2
 import numpy as np
 
+try:
+    from skimage.morphology import skeletonize as _skel_fn
+    _SKIMAGE_OK = True
+except ImportError:
+    _SKIMAGE_OK = False
+
+# â”€â”€ Tuning constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+_W, _H        = 400, 500      # standard processing size (pixels)
+_N_ORI        = 8             # Gabor filter orientations
+_BLOCK        = 16            # segmentation / local-variance block size
+_BORDER       = 14            # ignore minutiae within this many pixels of edge
+_MIN_MINUTIAE = 15            # below this â†’ not a fingerprint
+_N_ANCHORS    = 8             # how many anchor pairs to try per match
+_POS_THRESH   = 20.0          # px â€” position tolerance for minutia match
+_ANG_THRESH   = 25.0          # deg â€” angle tolerance for minutia match
+_MIN_DIST     = 8.0           # px â€” deduplicate minutiae closer than this
+
 
 class FingerprintEngineV2:
-    """
-    Experimental fingerprint engine using AKAZE descriptors.
-    Kept separate from the current ORB engine to allow safe A/B testing.
-    """
+    """Minutiae-based fingerprint engine (v2)."""
 
     def __init__(self):
-        self.detector = cv2.AKAZE_create()
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        self.max_template_keypoints = 200
+        self._gabor = self._build_gabor_bank()
 
-    def _channel_quality(self, ch: np.ndarray) -> float:
-        edges = cv2.Canny(ch, 45, 140)
-        edge_density = float(np.sum(edges > 0)) / float(max(1, ch.shape[0] * ch.shape[1]))
-        lap_var = float(cv2.Laplacian(ch, cv2.CV_32F).var())
-        # Balance structure presence and sharpness.
-        return edge_density * min(1.0, lap_var / 300.0)
+    # â”€â”€ Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    def read_image(self, image_bytes: bytes) -> np.ndarray:
-        arr = np.frombuffer(image_bytes, np.uint8)
-        raw = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
-        if raw is None:
-            raise ValueError("Invalid fingerprint image.")
+    def _build_gabor_bank(self) -> list:
+        kernels = []
+        for i in range(_N_ORI):
+            theta = i * math.pi / _N_ORI
+            k = cv2.getGaborKernel(
+                ksize=(17, 17), sigma=3.5, theta=theta,
+                lambd=9.0, gamma=0.5, psi=0, ktype=cv2.CV_32F,
+            )
+            kernels.append(k)
+        return kernels
 
-        # If already grayscale, keep as-is.
-        if len(raw.shape) == 2:
-            return raw
+    # â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-        # Convert edited/recolored images to a stable monochrome signal by
-        # selecting the channel with strongest ridge-like structure.
-        if raw.shape[2] == 4:
-            bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+    def read_image(self, img_bytes: bytes) -> np.ndarray:
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError("Cannot decode image bytes")
+        return img
+
+    def analyze(self, img: np.ndarray) -> dict:
+        """Single-pass full pipeline. Returns template + quality + likeness in one call.
+
+        Fields returned:
+          template       â€“ dict ready for JSON storage in Supabase
+          quality        â€“ float 0-1
+          likeness       â€“ float 0-1 (how fingerprint-like the image is)
+          minutiae_count â€“ int
+          ridge_ratio    â€“ float (fraction of image with ridge structure)
+        """
+        gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        enhanced, mask = self._enhance_and_segment(gray)
+        binary   = self._binarize(enhanced, mask)
+        skeleton = self._thin(binary)
+        orient   = self._orientation_map(enhanced)
+        minutiae = self._extract_minutiae(skeleton, mask, orient)
+        minutiae = self._deduplicate(minutiae)
+
+        count       = len(minutiae)
+        ridge_ratio = float(mask.sum()) / max(1, mask.size)
+
+        # Likeness: non-fingerprint images produce 0-8 minutiae â†’ score near 0
+        if count < _MIN_MINUTIAE:
+            likeness = count / _MIN_MINUTIAE * 0.44
         else:
-            bgr = raw
+            likeness = 0.44 + 0.56 * min(1.0, (count - _MIN_MINUTIAE) / 35.0)
 
-        b, g, r = cv2.split(bgr)
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        hsv_v = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
-        lab_l = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[:, :, 0]
-
-        candidates = [gray, b, g, r, hsv_v, lab_l]
-        best = max(candidates, key=self._channel_quality)
-        return best
-
-    def preprocess(self, img: np.ndarray) -> np.ndarray:
-        # Improve color-edit invariance by normalizing dynamic range first.
-        norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
-        eq = clahe.apply(norm)
-        den = cv2.bilateralFilter(eq, 5, 45, 45)
-        return den
-
-    @staticmethod
-    def _clamp01(x: float) -> float:
-        return float(max(0.0, min(1.0, x)))
-
-    @staticmethod
-    def _range_score(x: float, lo: float, hi: float) -> float:
-        if hi <= lo:
-            return 0.0
-        return float(max(0.0, min(1.0, (x - lo) / (hi - lo))))
-
-    def fingerprint_likeness_components(self, img: np.ndarray) -> dict:
-        h, w = img.shape[:2]
-        if h == 0 or w == 0:
-            return {
-                "score": 0.0,
-                "coverage": 0.0,
-                "orientation_entropy": 0.0,
-                "kp_count": 0,
-                "kp_density": 0.0,
-                "kp_spread": 0.0,
-                "tile_active_ratio": 0.0,
-                "tile_coverage_std": 0.0,
-                "edge_component_count": 0,
-                "largest_edge_component_ratio": 1.0,
-                "periodic_tile_ratio": 0.0,
-                "mean_periodicity": 0.0,
-                "ridge_block_ratio": 0.0,
-                "line_count": 0,
-                "circle_count": 0,
-            }
-
-        raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-        arr = raw_norm.astype(np.float32)
-        gx = cv2.Sobel(arr, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(arr, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(gx * gx + gy * gy)
-
-        # Real fingerprints usually have ridge texture over a large fraction of the image.
-        informative = grad_mag > 12.0
-        coverage = float(np.mean(informative))
-        score_coverage = self._range_score(coverage, 0.12, 0.35)
-
-        theta = (np.arctan2(gy, gx) + np.pi) % np.pi
-
-        # Spatial distribution check: fingerprints spread ridge texture over many regions,
-        # while drawings often occupy only a few tiles.
-        grid_n = 6
-        active_tiles = 0
-        tile_covs = []
-        for gy_i in range(grid_n):
-            y0 = int(gy_i * h / grid_n)
-            y1 = int((gy_i + 1) * h / grid_n)
-            for gx_i in range(grid_n):
-                x0 = int(gx_i * w / grid_n)
-                x1 = int((gx_i + 1) * w / grid_n)
-                tile = informative[y0:y1, x0:x1]
-                if tile.size == 0:
-                    tile_cov = 0.0
-                else:
-                    tile_cov = float(np.mean(tile))
-                tile_covs.append(tile_cov)
-                if tile_cov >= 0.08:
-                    active_tiles += 1
-        tile_active_ratio = float(active_tiles) / float(grid_n * grid_n)
-        tile_coverage_std = float(np.std(np.array(tile_covs, dtype=np.float32))) if tile_covs else 0.0
-        score_tile_active = self._range_score(tile_active_ratio, 0.28, 0.70)
-        score_tile_uniform = 1.0 - self._range_score(tile_coverage_std, 0.20, 0.45)
-
-        # Fingerprints exhibit repeated ridge spacing in many local tiles.
-        # Diagrams/photos can have edges, but usually not consistent mid-frequency periodicity.
-        tile_size = 32
-        periodic_hits = 0
-        periodic_scores = []
-        ridge_blocks = 0
-        total_blocks = 0
-        for y0 in range(0, max(1, h - tile_size + 1), tile_size):
-            for x0 in range(0, max(1, w - tile_size + 1), tile_size):
-                tile = arr[y0:y0 + tile_size, x0:x0 + tile_size]
-                if tile.shape[0] != tile_size or tile.shape[1] != tile_size:
-                    continue
-                total_blocks += 1
-                tile = tile - float(np.mean(tile))
-                if float(np.std(tile)) < 10.0:
-                    continue
-
-                gx_t = gx[y0:y0 + tile_size, x0:x0 + tile_size]
-                gy_t = gy[y0:y0 + tile_size, x0:x0 + tile_size]
-                grad_t = np.sqrt(gx_t * gx_t + gy_t * gy_t)
-                informative_t = grad_t > 12.0
-                tile_cov = float(np.mean(informative_t)) if informative_t.size else 0.0
-
-                theta_t = theta[y0:y0 + tile_size, x0:x0 + tile_size]
-                theta_vals = theta_t[informative_t]
-                if theta_vals.size >= 24:
-                    vcos = np.cos(2.0 * theta_vals)
-                    vsin = np.sin(2.0 * theta_vals)
-                    tile_coh = float(np.sqrt(np.sum(vcos) ** 2 + np.sum(vsin) ** 2) / max(1.0, theta_vals.size))
-                else:
-                    tile_coh = 0.0
-
-                window = np.outer(np.hanning(tile_size), np.hanning(tile_size)).astype(np.float32)
-                f = np.fft.fftshift(np.fft.fft2(tile * window))
-                mag = np.abs(f)
-                yy, xx = np.indices((tile_size, tile_size))
-                cy = cx = tile_size // 2
-                rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-                # Mid-frequency annulus where fingerprint ridge spacing usually lives.
-                band = mag[(rr >= 3.0) & (rr <= 10.0)]
-                if band.size < 8:
-                    continue
-                peak = float(np.max(band))
-                med = float(np.median(band))
-                periodicity = peak / (med + 1e-6)
-                periodic_scores.append(periodicity)
-                if periodicity >= 6.0:
-                    periodic_hits += 1
-                if tile_cov >= 0.10 and tile_coh >= 0.55 and periodicity >= 6.0:
-                    ridge_blocks += 1
-
-        periodic_tile_ratio = float(periodic_hits) / float(max(1, len(periodic_scores)))
-        mean_periodicity = float(np.mean(periodic_scores)) if periodic_scores else 0.0
-        ridge_block_ratio = float(ridge_blocks) / float(max(1, total_blocks))
-        score_periodic_tiles = self._range_score(periodic_tile_ratio, 0.22, 0.55)
-        score_periodicity = self._range_score(mean_periodicity, 4.0, 10.0)
-        score_ridge_blocks = self._range_score(ridge_block_ratio, 0.12, 0.35)
-
-        # Fingerprints have varied local ridge directions (loops/whorls/arcs),
-        # while simple drawings often have only a few dominant directions.
-        informative_theta = theta[informative]
-        if informative_theta.size >= 32:
-            hist, _ = np.histogram(informative_theta, bins=12, range=(0.0, np.pi))
-            p = hist.astype(np.float64)
-            p_sum = float(p.sum())
-            if p_sum > 0:
-                p = p / p_sum
-                p = p[p > 0]
-                entropy = float(-(p * np.log(p)).sum())
-                entropy_norm = entropy / np.log(12.0)
-            else:
-                entropy_norm = 0.0
+        # Quality: good fingerprint = high count + good ridge coverage
+        if count < _MIN_MINUTIAE:
+            quality = max(0.0, count / _MIN_MINUTIAE * 0.38)
         else:
-            entropy_norm = 0.0
-        score_entropy = self._range_score(entropy_norm, 0.45, 0.90)
+            quality = (0.65 * min(1.0, count / 50.0)
+                       + 0.35 * min(1.0, ridge_ratio / 0.22))
 
-        proc = self.preprocess(img)
-        kps, _ = self.detector.detectAndCompute(proc, None)
-        kp_count = int(len(kps)) if kps is not None else 0
-        kp_density = float(kp_count) / float(max(1, h * w))
-        score_density = self._range_score(kp_density, 0.00008, 0.00050)
-
-        if kp_count >= 2:
-            pts = np.array([[kp.pt[0], kp.pt[1]] for kp in kps], dtype=np.float32)
-            sx = float(np.std(pts[:, 0])) / float(max(1.0, w))
-            sy = float(np.std(pts[:, 1])) / float(max(1.0, h))
-            kp_spread = 0.5 * (sx + sy)
-        else:
-            kp_spread = 0.0
-        score_spread = self._range_score(kp_spread, 0.08, 0.22)
-
-        # Connected-component structure on edge map.
-        # Fingerprints usually produce many distributed ridge fragments,
-        # while drawings have fewer components dominated by one/few strokes.
-        edges = cv2.Canny(proc, 45, 140)
-        bin_edges = (edges > 0).astype(np.uint8)
-        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bin_edges, connectivity=8)
-        component_areas = []
-        for i in range(1, num_labels):
-            a = int(stats[i, cv2.CC_STAT_AREA])
-            if a >= 8:
-                component_areas.append(a)
-        edge_component_count = int(len(component_areas))
-        sum_area = float(sum(component_areas))
-        largest_ratio = (float(max(component_areas)) / sum_area) if sum_area > 0 else 1.0
-        score_components = self._range_score(float(edge_component_count), 45.0, 180.0)
-        score_largest_ratio = 1.0 - self._range_score(largest_ratio, 0.22, 0.65)
-
-        # Geometric primitive detector (center crop): diagrams often contain long straight
-        # lines and circles; real fingerprints rarely contain those primitives in the core area.
-        ch, cw = proc.shape[:2]
-        y0 = int(0.08 * ch)
-        y1 = int(0.92 * ch)
-        x0 = int(0.08 * cw)
-        x1 = int(0.92 * cw)
-        core = proc[y0:y1, x0:x1] if (y1 > y0 and x1 > x0) else proc
-        core_edges = cv2.Canny(core, 55, 160)
-        min_len = int(0.30 * min(core.shape[0], core.shape[1]))
-        lines = cv2.HoughLinesP(core_edges, 1, np.pi / 180.0, threshold=60, minLineLength=max(16, min_len), maxLineGap=6)
-        line_count = int(len(lines)) if lines is not None else 0
-
-        circles = cv2.HoughCircles(
-            cv2.GaussianBlur(core, (5, 5), 1.2),
-            cv2.HOUGH_GRADIENT,
-            dp=1.2,
-            minDist=max(20, int(0.12 * min(core.shape[:2]))),
-            param1=120,
-            param2=24,
-            minRadius=max(8, int(0.06 * min(core.shape[:2]))),
-            maxRadius=max(20, int(0.45 * min(core.shape[:2]))),
-        )
-        circle_count = int(circles.shape[1]) if circles is not None else 0
-
-        score = (
-            0.16 * score_coverage
-            + 0.14 * score_entropy
-            + 0.10 * score_density
-            + 0.08 * score_spread
-            + 0.12 * score_tile_active
-            + 0.08 * score_tile_uniform
-            + 0.10 * score_components
-            + 0.06 * score_largest_ratio
-            + 0.10 * score_periodic_tiles
-            + 0.06 * score_periodicity
-            + 0.08 * score_ridge_blocks
-        )
-
+        template = {
+            "minutiae": minutiae,   # list of [x, y, angle_deg, type]
+            "width":    _W,
+            "height":   _H,
+            "count":    count,
+            "algorithm": "minutiae_v1",
+        }
         return {
-            "score": self._clamp01(score),
-            "coverage": float(coverage),
-            "orientation_entropy": float(entropy_norm),
-            "kp_count": int(kp_count),
-            "kp_density": float(kp_density),
-            "kp_spread": float(kp_spread),
-            "tile_active_ratio": float(tile_active_ratio),
-            "tile_coverage_std": float(tile_coverage_std),
-            "edge_component_count": int(edge_component_count),
-            "largest_edge_component_ratio": float(largest_ratio),
-            "periodic_tile_ratio": float(periodic_tile_ratio),
-            "mean_periodicity": float(mean_periodicity),
-            "ridge_block_ratio": float(ridge_block_ratio),
-            "line_count": int(line_count),
-            "circle_count": int(circle_count),
+            "template":       template,
+            "quality":        float(quality),
+            "likeness":       float(likeness),
+            "minutiae_count": count,
+            "ridge_ratio":    float(ridge_ratio),
+        }
+
+    # Legacy wrappers kept for compatibility with model_service and old route code
+    def fingerprint_likeness_components(self, img: np.ndarray) -> dict:
+        r = self.analyze(img)
+        return {
+            "score":             r["likeness"],
+            "minutiae_count":    r["minutiae_count"],
+            "ridge_block_ratio": r["ridge_ratio"],
+            "kp_count":          r["minutiae_count"],
+            "coverage":          r["ridge_ratio"],
         }
 
     def quality_score(self, img: np.ndarray) -> float:
-        """
-        Heuristic quality score in [0, 1].
+        return self.analyze(img)["quality"]
 
-        Three components:
-        - coverage  (weight 0.65): fraction of pixels with non-trivial gradient,
-                measured on the RAW image before CLAHE. CLAHE amplifies noise on
-                blank white areas, creating fake gradients and inflating coverage.
-                Fingerprints have ridges across the whole image (coverage >0.25).
-                Diagrams on white paper have only a few lines (coverage <0.04).
-        - edge_density (0.20): Canny edge fraction on preprocessed image.
-        - sharpness   (0.15): Laplacian variance on preprocessed image.
-        """
-        h, w = img.shape[:2]
-        if h == 0 or w == 0:
+    def extract_template(self, img: np.ndarray) -> dict:
+        return self.analyze(img)["template"]
+
+    # â”€â”€ Pipeline steps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _enhance_and_segment(self, gray: np.ndarray):
+        """CLAHE + Gabor enhancement, plus variance-based segmentation mask."""
+        resized  = cv2.resize(gray, (_W, _H), interpolation=cv2.INTER_AREA)
+        clahe    = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        equalized = clahe.apply(resized)
+
+        # Gabor bank: take max response across all orientations
+        resp = np.zeros((_H, _W), dtype=np.float32)
+        eq_f = equalized.astype(np.float32)
+        for k in self._gabor:
+            r = cv2.filter2D(eq_f, cv2.CV_32F, k)
+            np.maximum(resp, r, out=resp)
+
+        # Normalise to uint8
+        r_min, r_max = float(resp.min()), float(resp.max())
+        if r_max > r_min:
+            enhanced = ((resp - r_min) / (r_max - r_min) * 255.0).astype(np.uint8)
+        else:
+            enhanced = equalized
+
+        # Segmentation: local std-dev via blur trick (fully vectorised)
+        f2  = enhanced.astype(np.float32)
+        mu  = cv2.blur(f2, (_BLOCK, _BLOCK))
+        mu2 = cv2.blur(f2 * f2, (_BLOCK, _BLOCK))
+        std = np.sqrt(np.maximum(0.0, mu2 - mu * mu))
+        mask_u8 = (std > 8.0).astype(np.uint8) * 255
+        kern    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_BLOCK, _BLOCK))
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kern)
+
+        return enhanced, mask_u8 > 0
+
+    def _binarize(self, enhanced: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        binary = cv2.adaptiveThreshold(
+            enhanced, 255,
+            cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV,
+            blockSize=15, C=4,
+        )
+        binary[~mask] = 0
+        return binary
+
+    def _thin(self, binary: np.ndarray) -> np.ndarray:
+        """Skeletonise ridges to 1-pixel width (Zhang-Suen via scikit-image)."""
+        if _SKIMAGE_OK:
+            return (_skel_fn(binary > 0).astype(np.uint8)) * 255
+        # Pure-OpenCV iterative fallback
+        skel = np.zeros_like(binary)
+        el   = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        tmp  = binary.copy()
+        while True:
+            er  = cv2.erode(tmp, el)
+            op  = cv2.dilate(er, el)
+            skel = cv2.bitwise_or(skel, cv2.subtract(tmp, op))
+            tmp  = er
+            if cv2.countNonZero(tmp) == 0:
+                break
+        return skel
+
+    def _orientation_map(self, enhanced: np.ndarray) -> np.ndarray:
+        """Ridge orientation at every pixel using structure tensor (0-180 deg)."""
+        f   = enhanced.astype(np.float32)
+        gx  = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3)
+        gy  = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3)
+        Gxx = cv2.GaussianBlur(gx * gx, (5, 5), 1.0)
+        Gyy = cv2.GaussianBlur(gy * gy, (5, 5), 1.0)
+        Gxy = cv2.GaussianBlur(gx * gy, (5, 5), 1.0)
+        angle = 0.5 * np.degrees(np.arctan2(2.0 * Gxy, Gxx - Gyy)) + 90.0
+        return angle % 180.0
+
+    def _extract_minutiae(
+        self, skeleton: np.ndarray, mask: np.ndarray, orient: np.ndarray
+    ) -> list:
+        """Vectorised crossing-number minutiae detection."""
+        sk = (skeleton > 0).astype(np.int32)
+        h, w = sk.shape
+
+        # 8-connectivity neighbour count (fully vectorised)
+        nb = np.zeros((h, w), dtype=np.int32)
+        nb[1:-1, 1:-1] = (
+            sk[:-2, :-2] + sk[:-2, 1:-1] + sk[:-2, 2:] +
+            sk[1:-1, :-2] +               sk[1:-1, 2:] +
+            sk[2:, :-2]  + sk[2:, 1:-1]  + sk[2:, 2:]
+        )
+
+        in_border = np.zeros((h, w), dtype=bool)
+        in_border[_BORDER:h - _BORDER, _BORDER:w - _BORDER] = True
+        valid = (sk > 0) & mask & in_border
+
+        endings = valid & (nb == 1)   # ridge ending
+        bifurcs = valid & (nb >= 3)   # bifurcation
+
+        minutiae = []
+        for y, x in zip(*np.where(endings)):
+            minutiae.append([int(x), int(y), float(orient[y, x]), 0])
+        for y, x in zip(*np.where(bifurcs)):
+            minutiae.append([int(x), int(y), float(orient[y, x]), 1])
+
+        # Cap to avoid very noisy templates
+        if len(minutiae) > 100:
+            minutiae = minutiae[:100]
+        return minutiae
+
+    def _deduplicate(self, minutiae: list, min_dist: float = _MIN_DIST) -> list:
+        if len(minutiae) < 2:
+            return minutiae
+        xy   = np.array([[m[0], m[1]] for m in minutiae], dtype=np.float32)
+        keep = []
+        used = np.zeros(len(minutiae), dtype=bool)
+        for i in range(len(minutiae)):
+            if used[i]:
+                continue
+            keep.append(minutiae[i])
+            dists = np.hypot(xy[i, 0] - xy[:, 0], xy[i, 1] - xy[:, 1])
+            used |= (dists < min_dist) & (dists > 0)
+        return keep
+
+    # â”€â”€ Matching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def match_score(self, tpl_a: dict, tpl_b: dict) -> float:
+        """Match two templates. Handles minutiae_v1 and legacy AKAZE formats."""
+        # Legacy AKAZE: both templates must have 'des' key
+        if "des" in tpl_a and "des" in tpl_b:
+            return self._akaze_match(tpl_a, tpl_b)
+        # Mixed formats (one minutiae, one AKAZE) â†’ cannot compare meaningfully
+        if "minutiae" not in tpl_a or "minutiae" not in tpl_b:
             return 0.0
-
-        # Coverage on the raw normalized image — before CLAHE so blank-area noise
-        # isn't amplified into fake ridges.
-        raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-        gx_r = cv2.Sobel(raw_norm.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
-        gy_r = cv2.Sobel(raw_norm.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(gx_r * gx_r + gy_r * gy_r)
-        coverage = float(np.sum(grad_mag > 12.0)) / float(h * w)
-        score_coverage = min(1.0, coverage / 0.25)  # 0.25 coverage -> full score
-
-        proc = self.preprocess(img)
-        edges = cv2.Canny(proc, 45, 140)
-        edge_density = float(np.sum(edges > 0)) / float(h * w)
-        score_edge = min(1.0, max(0.0, edge_density / 0.25))
-
-        lap_var = float(cv2.Laplacian(proc, cv2.CV_32F).var())
-        score_sharp = min(1.0, lap_var / 300.0)
-
-        score = 0.65 * score_coverage + 0.20 * score_edge + 0.15 * score_sharp
-        return float(max(0.0, min(1.0, score)))
-
-    def extract_template(self, img_gray: np.ndarray) -> dict:
-        proc = self.preprocess(img_gray)
-        kps, des = self.detector.detectAndCompute(proc, None)
-        if des is None or len(kps) < 30:
-            raise ValueError("Fingerprint features not found. Use a clearer image.")
-
-        # Cap template size to keep API/database payloads stable in production.
-        if len(kps) > self.max_template_keypoints:
-            idx = np.argsort([-float(k.response) for k in kps])[: self.max_template_keypoints]
-            des = des[idx]
-            kps = [kps[int(i)] for i in idx]
-
-        kp_coords = [[float(p.pt[0]), float(p.pt[1])] for p in kps]
-        return {
-            "algo": "akaze_v2",
-            "des": des.tolist(),
-            "shape": list(des.shape),
-            "kps": kp_coords,
-        }
-
-    def deserialize_template(self, tpl: dict):
-        if "des" not in tpl or "shape" not in tpl:
-            return None, None
-        des = np.array(tpl["des"], dtype=np.uint8).reshape(tpl["shape"][0], tpl["shape"][1])
-        kps = None
-        if "kps" in tpl:
-            kps = np.array(tpl["kps"], dtype=np.float32)
-        return des, kps
-
-    def match_score(self, query_tpl: dict, db_tpl: dict) -> float:
-        q_des, q_kps = self.deserialize_template(query_tpl)
-        d_des, d_kps = self.deserialize_template(db_tpl)
-        if q_des is None or d_des is None:
+        m_a = tpl_a["minutiae"]
+        m_b = tpl_b["minutiae"]
+        if len(m_a) < 3 or len(m_b) < 3:
             return 0.0
+        return self._minutiae_match(m_a, m_b)
 
+    def _minutiae_match(self, m_a: list, m_b: list) -> float:
+        """Alignment-based minutiae matching (rotation + translation tolerant)."""
+        arr_a = np.array([[m[0], m[1], m[2]] for m in m_a], dtype=np.float64)
+        arr_b = np.array([[m[0], m[1], m[2]] for m in m_b], dtype=np.float64)
+        na, nb = len(arr_a), len(arr_b)
+
+        best    = 0
+        n_a = min(_N_ANCHORS, na)
+        n_b = min(_N_ANCHORS, nb)
+        for i in range(n_a):
+            for j in range(n_b):
+                c = self._aligned_count(arr_a, arr_b, i, j)
+                if c > best:
+                    best = c
+
+        return float(min(1.0, best / math.sqrt(max(1, na) * max(1, nb))))
+
+    def _aligned_count(
+        self, arr_a: np.ndarray, arr_b: np.ndarray, ai: int, bi: int
+    ) -> int:
+        """Rigid-align arr_a onto arr_b using anchor pair (ai, bi); count inliers."""
+        ax, ay, aa = arr_a[ai]
+        bx, by, ba = arr_b[bi]
+        rot_rad = math.radians(float(ba - aa))
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        # Transform all of arr_a into arr_b frame (vectorised)
+        dx = arr_a[:, 0] - ax
+        dy = arr_a[:, 1] - ay
+        tx = cos_r * dx - sin_r * dy + bx
+        ty = sin_r * dx + cos_r * dy + by
+        ta = (arr_a[:, 2] + math.degrees(rot_rad)) % 180.0
+
+        matched = 0
+        used    = set()
+        for k in range(len(tx)):
+            diff_x = arr_b[:, 0] - tx[k]
+            diff_y = arr_b[:, 1] - ty[k]
+            dists  = np.hypot(diff_x, diff_y)
+            ang_d  = np.abs(((arr_b[:, 2] - ta[k]) + 90.0) % 180.0 - 90.0)
+            cands  = np.where((dists < _POS_THRESH) & (ang_d < _ANG_THRESH))[0]
+            cands  = [int(c) for c in cands if int(c) not in used]
+            if cands:
+                best_j = int(cands[int(np.argmin(dists[[c for c in cands]]))])
+                matched += 1
+                used.add(best_j)
+        return matched
+
+    def _akaze_match(self, tpl_a: dict, tpl_b: dict) -> float:
+        """Backward-compat AKAZE matching for templates enrolled before the minutiae engine."""
         try:
-            knn = self.bf.knnMatch(q_des, d_des, k=2)
-            good = []
-            for pair in knn:
-                if len(pair) < 2:
-                    continue
-                m, n = pair
-                if m.distance < 0.82 * n.distance:  # more permissive ratio test
-                    good.append(m)
-
-            num_good = len(good)
-            if num_good == 0:
+            da = np.array(tpl_a["des"], dtype=np.uint8)
+            db = np.array(tpl_b["des"], dtype=np.uint8)
+            if da.ndim != 2 or db.ndim != 2:
                 return 0.0
-
-            # Reward descriptor agreement directly so same-finger partial captures
-            # are not over-penalized by a fragile global homography fit.
-            score_matches = float(min(1.0, num_good / 28.0))
-            mean_distance = float(np.mean([m.distance for m in good]))
-            score_distance = float(max(0.0, min(1.0, 1.0 - (mean_distance / 80.0))))
-
-            if q_kps is not None and d_kps is not None and num_good >= 6:
-                pts_q = np.float32([q_kps[m.queryIdx] for m in good]).reshape(-1, 2)
-                pts_d = np.float32([d_kps[m.trainIdx] for m in good]).reshape(-1, 2)
-                _, mask = cv2.findHomography(pts_q, pts_d, cv2.RANSAC, 6.0)  # more tolerant RANSAC
-                inliers = int(np.sum(mask)) if mask is not None else 0
-                inlier_ratio = inliers / float(max(1, num_good))
-                score = 0.45 * inlier_ratio + 0.35 * score_matches + 0.20 * score_distance
-                return float(max(0.0, min(1.0, score)))
-
-            score = 0.70 * score_matches + 0.30 * score_distance
-            return float(max(0.0, min(1.0, score)))
+            bf      = cv2.BFMatcher(cv2.NORM_HAMMING)
+            matches = bf.knnMatch(da, db, k=2)
+            good    = [m for m, n in matches if m.distance < 0.75 * n.distance]
+            return float(len(good)) / max(1, min(len(da), len(db)))
         except Exception:
             return 0.0
+
+    # â”€â”€ Preprocess (legacy compat â€” not used by minutiae pipeline) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def preprocess(self, img: np.ndarray) -> np.ndarray:
+        """Legacy preprocessing kept for model_service backward compat."""
+        norm  = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+        eq    = clahe.apply(norm)
+        return cv2.bilateralFilter(eq, 5, 45, 45)

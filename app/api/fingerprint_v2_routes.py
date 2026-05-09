@@ -111,119 +111,30 @@ async def _post_model_service(path: str, files=None, data=None) -> dict:
     return payload
 
 
-_MATCH_ROTATIONS = (-12, -6, 0, 6, 12)
-
-
-def _extract_query_variants(img: np.ndarray) -> list[dict]:
-    """Extract AKAZE templates at multiple rotation angles for rotation-tolerant matching."""
-    h, w = img.shape[:2]
-    c = (w / 2.0, h / 2.0)
-    variants: list[dict] = []
-    for ang in _MATCH_ROTATIONS:
-        try:
-            if ang == 0:
-                view = img
-            else:
-                M = cv2.getRotationMatrix2D(c, float(ang), 1.0)
-                view = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-            tpl = _local_fp_v2.extract_template(view)
-            variants.append(tpl)
-        except Exception:
-            continue
-    return variants
-
-
 def _deserialize_tpl(tpl) -> dict | None:
     """Safely convert a template from Supabase (may arrive as JSON string or dict)."""
     if isinstance(tpl, str):
         try:
-            import json as _json
-            tpl = _json.loads(tpl)
+            tpl = json.loads(tpl)
         except Exception:
             return None
     if not isinstance(tpl, dict):
         return None
-    if "des" not in tpl or "shape" not in tpl:
+    # Accept both minutiae_v1 and legacy AKAZE formats
+    if "minutiae" not in tpl and "des" not in tpl:
         return None
     return tpl
 
 
-def _local_match_payload(img_bytes: bytes, tpl_batch: list[dict], fallback_detail: str = "") -> dict:
-    """Fallback matcher used when model-service is unavailable/times out."""
-    img = _local_fp_v2.read_image(img_bytes)
-    likeness = _local_fp_v2.fingerprint_likeness_components(img)
-    like_score = _safe_float(likeness.get("score", 0.0), 0.0)
-    if like_score < _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58):
-        return {
-            "best_index": None,
-            "score": 0.0,
-            "matched": False,
-            "tier": "reject_non_fingerprint",
-            "likeness_score": like_score,
-            "likeness_threshold": _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58),
-            "reasons": ["low_likeness_score_fallback"],
-            "likeness_components": likeness,
-            "threshold": _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18),
-            "algorithm": "akaze_v2_fallback",
-            "fallback_reason": fallback_detail,
-        }
-
-    quality = _safe_float(_local_fp_v2.quality_score(img), 0.0)
-    quality_threshold = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.30)
-    if quality < quality_threshold:
-        return {
-            "best_index": None,
-            "score": 0.0,
-            "matched": False,
-            "tier": "reject_quality",
-            "quality_score": quality,
-            "quality_threshold": quality_threshold,
-            "reasons": ["low_quality_fingerprint_image_fallback"],
-            "threshold": _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18),
-            "algorithm": "akaze_v2_fallback",
-            "fallback_reason": fallback_detail,
-        }
-
-    query_tpl = _local_fp_v2.extract_template(img)
-    best_index = None
-    best_score = float("-inf")
-    for i, tpl in enumerate(tpl_batch):
-        s = _safe_float(_local_fp_v2.match_score(query_tpl, tpl), 0.0)
-        if s > best_score:
-            best_score = s
-            best_index = i
-
-    if best_index is None:
-        return {
-            "best_index": None,
-            "score": 0.0,
-            "matched": False,
-            "tier": "no_match",
-            "quality_score": quality,
-            "quality_threshold": quality_threshold,
-            "threshold": _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18),
-            "algorithm": "akaze_v2_fallback",
-            "fallback_reason": fallback_detail,
-        }
-
-    threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18)
-    matched = best_score >= threshold
+def _local_match_payload_compat(img_bytes: bytes, tpl_batch: list[dict], fallback_detail: str = "") -> dict:
+    """Compat stub — routes now call match route logic directly."""
     return {
-        "best_index": int(best_index),
-        "score": float(max(0.0, best_score)),
-        "matched": bool(matched),
-        "tier": "auto" if matched else "reject_low_similarity",
-        "quality_score": quality,
-        "quality_threshold": quality_threshold,
-        "likeness_score": like_score,
-        "likeness_threshold": _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58),
-        "likeness_components": likeness,
-        "threshold": threshold,
-        "algorithm": "akaze_v2_fallback",
-        "query_rotation_deg": 0,
-        "query_variants": 1,
-        "fallback_reason": fallback_detail,
-    }
+        "best_index": None,
+        "score": 0.0,
+        "matched": False,
+            "tier": "no_match",
+            "fallback_reason": fallback_detail,
+        }
 
 
 @router_fp_v2.post("/experimental/enroll/fingerprint", tags=["Fingerprint V2"])
@@ -245,34 +156,35 @@ async def enroll_fingerprint_v2(
             raise HTTPException(status_code=400, detail="Empty image file")
         img_bytes = _normalize_fingerprint_upload(img_bytes)
 
-        files = {
-            "image": (
-                image.filename or "fingerprint.jpg",
-                img_bytes,
-                image.content_type or "application/octet-stream",
-            )
-        }
-        payload = await _post_model_service("/fingerprint_v2/template", files=files)
+        # Run full minutiae pipeline locally — no model-service round-trip needed
+        img = _local_fp_v2.read_image(img_bytes)
+        analysis = _local_fp_v2.analyze(img)
+        likeness   = _safe_float(analysis["likeness"], 0.0)
+        quality    = _safe_float(analysis["quality"], 0.0)
+        count      = int(analysis["minutiae_count"])
+        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.40)
+        quality_threshold  = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.28)
 
-        if "error" in payload or "template" not in payload:
-            quality = payload.get("quality_score")
-            qtxt = f"{quality:.2f}" if isinstance(quality, (int, float)) else "N/A"
-            fp_score = payload.get("fp_score")
-            fptxt = f"{fp_score:.2f}" if isinstance(fp_score, (int, float)) else "N/A"
-            reasons = payload.get("reasons")
-            rtxt = f", reasons={reasons}" if reasons else ""
-            likeness = payload.get("likeness_score")
-            ltxt = f", likeness_score={likeness:.2f}" if isinstance(likeness, (int, float)) else ""
+        if likeness < likeness_threshold:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Fingerprint V2 validation failed: {payload.get('error', 'invalid image')}. "
-                    f"quality_score={qtxt}, fp_score={fptxt}{ltxt}{rtxt}. "
-                    f"Please use a clearer fingerprint image."
+                    f"Image does not appear to be a fingerprint "
+                    f"(likeness_score={likeness:.3f}, threshold={likeness_threshold:.2f}, "
+                    f"minutiae_count={count}). Please upload a clear fingerprint scan."
+                ),
+            )
+        if quality < quality_threshold:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Fingerprint image quality too low "
+                    f"(quality_score={quality:.3f}, threshold={quality_threshold:.2f}, "
+                    f"minutiae_count={count}). Please use a clearer fingerprint image."
                 ),
             )
 
-        template = payload["template"]
+        template = analysis["template"]
 
         # Keep compatibility with legacy enroll flow: ensure person exists first.
         person_payload = {
@@ -294,8 +206,8 @@ async def enroll_fingerprint_v2(
             "finger_label": finger_label,
             "template": template,
             "capture_method": capture_method,
-            "algorithm": payload.get("algorithm", "akaze_v2"),
-            "quality_score": payload.get("quality_score"),
+            "algorithm": "minutiae_v1",
+            "quality_score": quality,
         }
 
         existing = await sb.get("fingerprint_templates_v2", filters={"person_id": person_id, "finger_label": finger_label})
@@ -361,12 +273,14 @@ async def match_fingerprint_v2(
             raise HTTPException(status_code=400, detail="Empty image file")
         img_bytes = _normalize_fingerprint_upload(img_bytes)
 
-        # --- Run quality / fingerprint check then match entirely in-process ---
-        img = _local_fp_v2.read_image(img_bytes)
+        # Single-pass analysis: quality + likeness + template in one call
+        img      = _local_fp_v2.read_image(img_bytes)
+        analysis = _local_fp_v2.analyze(img)
+        like_score         = _safe_float(analysis["likeness"], 0.0)
+        quality            = _safe_float(analysis["quality"], 0.0)
+        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.40)
+        quality_threshold  = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.28)
 
-        likeness = _local_fp_v2.fingerprint_likeness_components(img)
-        like_score = _safe_float(likeness.get("score", 0.0), 0.0)
-        likeness_threshold = _safe_float(FINGERPRINT_V2_LIKENESS_THRESHOLD, 0.58)
         if like_score < likeness_threshold:
             return {
                 "matched": False,
@@ -375,15 +289,13 @@ async def match_fingerprint_v2(
                 "similarity": 0.0,
                 "likeness_score": like_score,
                 "likeness_threshold": likeness_threshold,
-                "likeness_components": likeness,
+                "minutiae_count": analysis["minutiae_count"],
                 "reasons": ["low_likeness_score"],
                 "tier": "reject_non_fingerprint",
-                "algorithm": "akaze_v2",
+                "algorithm": "minutiae_v1",
                 "finger_label": finger_label or None,
             }
 
-        quality = _safe_float(_local_fp_v2.quality_score(img), 0.0)
-        quality_threshold = _safe_float(FINGERPRINT_V2_QUALITY_THRESHOLD, 0.30)
         if quality < quality_threshold:
             return {
                 "matched": False,
@@ -392,47 +304,32 @@ async def match_fingerprint_v2(
                 "similarity": 0.0,
                 "quality_score": quality,
                 "quality_threshold": quality_threshold,
+                "minutiae_count": analysis["minutiae_count"],
                 "reasons": ["low_quality_fingerprint_image"],
                 "tier": "reject_quality",
-                "algorithm": "akaze_v2",
+                "algorithm": "minutiae_v1",
                 "finger_label": finger_label or None,
             }
 
-        # Extract rotation-tolerant query variants (±12°/±6°/0°) — same as model-service.
-        query_variants = _extract_query_variants(img)
-        if not query_variants:
-            return {
-                "matched": False,
-                "person_id": None,
-                "full_name": None,
-                "similarity": 0.0,
-                "quality_score": quality,
-                "quality_threshold": quality_threshold,
-                "reasons": ["insufficient_keypoints"],
-                "tier": "reject_quality",
-                "algorithm": "akaze_v2",
-                "finger_label": finger_label or None,
-            }
+        query_tpl = analysis["template"]
+        threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.35)
 
-        threshold = _safe_float(FINGERPRINT_V2_THRESHOLD, 0.18)
-
-        # Match each stored template against all rotation variants — pick global best.
+        # Match query template against every stored template (rotation tolerance
+        # is built into the minutiae matching algorithm — no multi-angle variants needed)
         best_score = float("-inf")
-        best_rec = None
-        best_rotation = 0
+        best_rec   = None
         for r in template_records:
             raw_tpl = r.get("template")
             tpl = _deserialize_tpl(raw_tpl)
             if tpl is None:
                 continue
-            for q_tpl in query_variants:
-                try:
-                    s = _safe_float(_local_fp_v2.match_score(q_tpl, tpl), 0.0)
-                except Exception:
-                    continue
-                if s > best_score:
-                    best_score = s
-                    best_rec = r
+            try:
+                s = _safe_float(_local_fp_v2.match_score(query_tpl, tpl), 0.0)
+            except Exception:
+                continue
+            if s > best_score:
+                best_score = s
+                best_rec   = r
 
         if best_rec is None:
             return {
@@ -449,9 +346,9 @@ async def match_fingerprint_v2(
             }
 
         best_score = max(0.0, best_score)
-        matched = best_score >= threshold
+        matched   = best_score >= threshold
         person_id = best_rec.get("person_id")
-        person = pmap.get(person_id, {}) if person_id else {}
+        person    = pmap.get(person_id, {}) if person_id else {}
 
         return {
             "matched": matched,
@@ -465,10 +362,10 @@ async def match_fingerprint_v2(
             "quality_threshold": quality_threshold,
             "likeness_score": like_score,
             "likeness_threshold": likeness_threshold,
+            "minutiae_count": analysis["minutiae_count"],
             "tier": "auto" if matched else "reject_low_similarity",
-            "algorithm": "akaze_v2",
+            "algorithm": "minutiae_v1",
             "finger_label": best_rec.get("finger_label") or (finger_label or None),
-            "query_variants": len(query_variants),
         }
     except HTTPException:
         raise
