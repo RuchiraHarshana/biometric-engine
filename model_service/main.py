@@ -88,6 +88,8 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     periodic_tile_ratio = float(likeness.get("periodic_tile_ratio", 0.0))
     mean_periodicity = float(likeness.get("mean_periodicity", 0.0))
     ridge_block_ratio = float(likeness.get("ridge_block_ratio", 0.0))
+    line_count = int(likeness.get("line_count", 0))
+    circle_count = int(likeness.get("circle_count", 0))
 
     reasons = []
     if score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
@@ -117,6 +119,21 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     )
     if weak_periodicity and (coverage < 0.18 or edge_component_count < 60):
         reasons.append("weak_ridge_periodicity_with_sparse_structure")
+
+    # Consensus gate: a valid fingerprint should satisfy most core structure signals.
+    core_failures = 0
+    core_failures += int(coverage < FINGERPRINT_V2_MIN_COVERAGE)
+    core_failures += int(kp_count < FINGERPRINT_V2_MIN_KP_COUNT)
+    core_failures += int(kp_spread < FINGERPRINT_V2_MIN_KP_SPREAD)
+    core_failures += int(tile_active_ratio < FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO)
+    core_failures += int(edge_component_count < FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT)
+    core_failures += int(largest_edge_component_ratio > FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO)
+    if core_failures >= 4:
+        reasons.append("low_core_fingerprint_signal")
+
+    # Explicit non-fingerprint geometry veto.
+    if (line_count >= 2 or circle_count >= 1) and edge_component_count < 160:
+        reasons.append("diagram_like_geometric_primitives")
 
     # Composite anti-diagram vetoes. Keep these strict for sparse, line-drawing patterns
     # while avoiding false rejects on weak real captures.

@@ -77,6 +77,11 @@ class FingerprintEngineV2:
                 "tile_coverage_std": 0.0,
                 "edge_component_count": 0,
                 "largest_edge_component_ratio": 1.0,
+                "periodic_tile_ratio": 0.0,
+                "mean_periodicity": 0.0,
+                "ridge_block_ratio": 0.0,
+                "line_count": 0,
+                "circle_count": 0,
             }
 
         raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
@@ -89,6 +94,8 @@ class FingerprintEngineV2:
         informative = grad_mag > 12.0
         coverage = float(np.mean(informative))
         score_coverage = self._range_score(coverage, 0.12, 0.35)
+
+        theta = (np.arctan2(gy, gx) + np.pi) % np.pi
 
         # Spatial distribution check: fingerprints spread ridge texture over many regions,
         # while drawings often occupy only a few tiles.
@@ -114,9 +121,66 @@ class FingerprintEngineV2:
         score_tile_active = self._range_score(tile_active_ratio, 0.28, 0.70)
         score_tile_uniform = 1.0 - self._range_score(tile_coverage_std, 0.20, 0.45)
 
+        # Fingerprints exhibit repeated ridge spacing in many local tiles.
+        # Diagrams/photos can have edges, but usually not consistent mid-frequency periodicity.
+        tile_size = 32
+        periodic_hits = 0
+        periodic_scores = []
+        ridge_blocks = 0
+        total_blocks = 0
+        for y0 in range(0, max(1, h - tile_size + 1), tile_size):
+            for x0 in range(0, max(1, w - tile_size + 1), tile_size):
+                tile = arr[y0:y0 + tile_size, x0:x0 + tile_size]
+                if tile.shape[0] != tile_size or tile.shape[1] != tile_size:
+                    continue
+                total_blocks += 1
+                tile = tile - float(np.mean(tile))
+                if float(np.std(tile)) < 10.0:
+                    continue
+
+                gx_t = gx[y0:y0 + tile_size, x0:x0 + tile_size]
+                gy_t = gy[y0:y0 + tile_size, x0:x0 + tile_size]
+                grad_t = np.sqrt(gx_t * gx_t + gy_t * gy_t)
+                informative_t = grad_t > 12.0
+                tile_cov = float(np.mean(informative_t)) if informative_t.size else 0.0
+
+                theta_t = theta[y0:y0 + tile_size, x0:x0 + tile_size]
+                theta_vals = theta_t[informative_t]
+                if theta_vals.size >= 24:
+                    vcos = np.cos(2.0 * theta_vals)
+                    vsin = np.sin(2.0 * theta_vals)
+                    tile_coh = float(np.sqrt(np.sum(vcos) ** 2 + np.sum(vsin) ** 2) / max(1.0, theta_vals.size))
+                else:
+                    tile_coh = 0.0
+
+                window = np.outer(np.hanning(tile_size), np.hanning(tile_size)).astype(np.float32)
+                f = np.fft.fftshift(np.fft.fft2(tile * window))
+                mag = np.abs(f)
+                yy, xx = np.indices((tile_size, tile_size))
+                cy = cx = tile_size // 2
+                rr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+                # Mid-frequency annulus where fingerprint ridge spacing usually lives.
+                band = mag[(rr >= 3.0) & (rr <= 10.0)]
+                if band.size < 8:
+                    continue
+                peak = float(np.max(band))
+                med = float(np.median(band))
+                periodicity = peak / (med + 1e-6)
+                periodic_scores.append(periodicity)
+                if periodicity >= 6.0:
+                    periodic_hits += 1
+                if tile_cov >= 0.10 and tile_coh >= 0.55 and periodicity >= 6.0:
+                    ridge_blocks += 1
+
+        periodic_tile_ratio = float(periodic_hits) / float(max(1, len(periodic_scores)))
+        mean_periodicity = float(np.mean(periodic_scores)) if periodic_scores else 0.0
+        ridge_block_ratio = float(ridge_blocks) / float(max(1, total_blocks))
+        score_periodic_tiles = self._range_score(periodic_tile_ratio, 0.22, 0.55)
+        score_periodicity = self._range_score(mean_periodicity, 4.0, 10.0)
+        score_ridge_blocks = self._range_score(ridge_block_ratio, 0.12, 0.35)
+
         # Fingerprints have varied local ridge directions (loops/whorls/arcs),
         # while simple drawings often have only a few dominant directions.
-        theta = (np.arctan2(gy, gx) + np.pi) % np.pi
         informative_theta = theta[informative]
         if informative_theta.size >= 32:
             hist, _ = np.histogram(informative_theta, bins=12, range=(0.0, np.pi))
@@ -165,15 +229,43 @@ class FingerprintEngineV2:
         score_components = self._range_score(float(edge_component_count), 45.0, 180.0)
         score_largest_ratio = 1.0 - self._range_score(largest_ratio, 0.22, 0.65)
 
+        # Geometric primitive detector (center crop): diagrams often contain long straight
+        # lines and circles; real fingerprints rarely contain those primitives in the core area.
+        ch, cw = proc.shape[:2]
+        y0 = int(0.08 * ch)
+        y1 = int(0.92 * ch)
+        x0 = int(0.08 * cw)
+        x1 = int(0.92 * cw)
+        core = proc[y0:y1, x0:x1] if (y1 > y0 and x1 > x0) else proc
+        core_edges = cv2.Canny(core, 55, 160)
+        min_len = int(0.30 * min(core.shape[0], core.shape[1]))
+        lines = cv2.HoughLinesP(core_edges, 1, np.pi / 180.0, threshold=60, minLineLength=max(16, min_len), maxLineGap=6)
+        line_count = int(len(lines)) if lines is not None else 0
+
+        circles = cv2.HoughCircles(
+            cv2.GaussianBlur(core, (5, 5), 1.2),
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=max(20, int(0.12 * min(core.shape[:2]))),
+            param1=120,
+            param2=24,
+            minRadius=max(8, int(0.06 * min(core.shape[:2]))),
+            maxRadius=max(20, int(0.45 * min(core.shape[:2]))),
+        )
+        circle_count = int(circles.shape[1]) if circles is not None else 0
+
         score = (
-            0.22 * score_coverage
-            + 0.18 * score_entropy
-            + 0.12 * score_density
-            + 0.10 * score_spread
-            + 0.14 * score_tile_active
+            0.16 * score_coverage
+            + 0.14 * score_entropy
+            + 0.10 * score_density
+            + 0.08 * score_spread
+            + 0.12 * score_tile_active
             + 0.08 * score_tile_uniform
             + 0.10 * score_components
             + 0.06 * score_largest_ratio
+            + 0.10 * score_periodic_tiles
+            + 0.06 * score_periodicity
+            + 0.08 * score_ridge_blocks
         )
 
         return {
@@ -187,6 +279,11 @@ class FingerprintEngineV2:
             "tile_coverage_std": float(tile_coverage_std),
             "edge_component_count": int(edge_component_count),
             "largest_edge_component_ratio": float(largest_ratio),
+            "periodic_tile_ratio": float(periodic_tile_ratio),
+            "mean_periodicity": float(mean_periodicity),
+            "ridge_block_ratio": float(ridge_block_ratio),
+            "line_count": int(line_count),
+            "circle_count": int(circle_count),
         }
 
     def quality_score(self, img: np.ndarray) -> float:
