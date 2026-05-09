@@ -9,6 +9,8 @@ from app.storage.supabase_client import client as sb
 
 
 router_fp_v2 = APIRouter()
+MAX_MATCH_BATCH_BYTES = 6 * 1024 * 1024
+MAX_MATCH_BATCH_ITEMS = 120
 
 
 def _v2_table_help() -> str:
@@ -67,11 +69,14 @@ async def enroll_fingerprint_v2(
             qtxt = f"{quality:.2f}" if isinstance(quality, (int, float)) else "N/A"
             fp_score = payload.get("fp_score")
             fptxt = f"{fp_score:.2f}" if isinstance(fp_score, (int, float)) else "N/A"
+            reasons = payload.get("reasons")
+            rtxt = f", reasons={reasons}" if reasons else ""
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Fingerprint V2 validation failed: {payload.get('error', 'invalid image')}. "
-                    f"quality_score={qtxt}, fp_score={fptxt}. Please use a clearer fingerprint image."
+                    f"quality_score={qtxt}, fp_score={fptxt}{rtxt}. "
+                    f"Please use a clearer fingerprint image."
                 ),
             )
 
@@ -169,14 +174,77 @@ async def match_fingerprint_v2(
                 image.content_type or "application/octet-stream",
             )
         }
-        data = {"templates": json.dumps(templates)}
-        payload = await _post_model_service("/fingerprint_v2/match", files=files, data=data)
+        batches = []
+        cur_tpl = []
+        cur_rec = []
+        cur_bytes = 2  # []
+        for tpl, rec in zip(templates, template_records):
+            tpl_json = json.dumps(tpl, separators=(",", ":"))
+            item_bytes = len(tpl_json.encode("utf-8")) + 1
+            if cur_tpl and (
+                len(cur_tpl) >= MAX_MATCH_BATCH_ITEMS
+                or (cur_bytes + item_bytes) > MAX_MATCH_BATCH_BYTES
+            ):
+                batches.append((cur_tpl, cur_rec))
+                cur_tpl = []
+                cur_rec = []
+                cur_bytes = 2
+            cur_tpl.append(tpl)
+            cur_rec.append(rec)
+            cur_bytes += item_bytes
+        if cur_tpl:
+            batches.append((cur_tpl, cur_rec))
 
-        best_index = payload.get("best_index")
-        score = float(payload.get("score", 0.0))
-        matched = bool(payload.get("matched", False)) and best_index is not None
+        global_best_score = float("-inf")
+        global_best_rec = None
+        global_threshold = 0.0
+        global_quality = 0.0
+        global_quality_threshold = 0.0
+        global_tier = "reject"
+        global_algorithm = "akaze_v2"
 
-        rec = template_records[int(best_index)] if matched else None
+        for tpl_batch, rec_batch in batches:
+            data = {"templates": json.dumps(tpl_batch, separators=(",", ":"))}
+            payload = await _post_model_service("/fingerprint_v2/match", files=files, data=data)
+
+            tier = payload.get("tier", "reject")
+            if tier in {"reject_non_fingerprint", "reject_quality"}:
+                return {
+                    "matched": False,
+                    "person_id": None,
+                    "full_name": None,
+                    "similarity": 0.0,
+                    "threshold": float(payload.get("threshold", 0.0)),
+                    "quality_score": float(payload.get("quality_score", 0.0)),
+                    "quality_threshold": float(payload.get("quality_threshold", 0.0)),
+                    "tier": tier,
+                    "algorithm": payload.get("algorithm", "akaze_v2"),
+                    "finger_label": finger_label or None,
+                }
+
+            score = float(payload.get("score", 0.0))
+            best_index = payload.get("best_index")
+            if isinstance(best_index, int) and 0 <= best_index < len(rec_batch):
+                if score > global_best_score:
+                    global_best_score = score
+                    global_best_rec = rec_batch[best_index]
+                    global_threshold = float(payload.get("threshold", 0.0))
+                    global_quality = float(payload.get("quality_score", 0.0))
+                    global_quality_threshold = float(payload.get("quality_threshold", 0.0))
+                    global_tier = tier
+                    global_algorithm = payload.get("algorithm", "akaze_v2")
+
+        if global_best_rec is None:
+            return {
+                "matched": False,
+                "person_id": None,
+                "full_name": None,
+                "similarity": 0.0,
+                "tier": "no_match",
+            }
+
+        matched = global_best_score >= global_threshold
+        rec = global_best_rec if matched else None
         person_id = rec.get("person_id") if rec else None
         person = pmap.get(person_id, {}) if person_id else {}
 
@@ -184,12 +252,12 @@ async def match_fingerprint_v2(
             "matched": matched,
             "person_id": person_id,
             "full_name": person.get("full_name") if person else None,
-            "similarity": score if matched else 0.0,
-            "threshold": float(payload.get("threshold", 0.0)),
-            "quality_score": float(payload.get("quality_score", 0.0)),
-            "quality_threshold": float(payload.get("quality_threshold", 0.0)),
-            "tier": payload.get("tier", "reject"),
-            "algorithm": payload.get("algorithm", "akaze_v2"),
+            "similarity": global_best_score if matched else 0.0,
+            "threshold": global_threshold,
+            "quality_score": global_quality,
+            "quality_threshold": global_quality_threshold,
+            "tier": "auto" if matched else (global_tier or "reject_low_similarity"),
+            "algorithm": global_algorithm,
             "finger_label": rec.get("finger_label") if rec else (finger_label or None),
         }
     except HTTPException:

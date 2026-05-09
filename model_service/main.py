@@ -59,20 +59,20 @@ def _env_float_ceil(name: str, default: float, ceil: float) -> float:
 
 
 FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
-FINGERPRINT_V2_QUALITY_THRESHOLD = _env_float_floor("FINGERPRINT_V2_QUALITY_THRESHOLD", 0.35, 0.35)
+FINGERPRINT_V2_QUALITY_THRESHOLD = _env_float_floor("FINGERPRINT_V2_QUALITY_THRESHOLD", 0.30, 0.30)
 FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.20"))
-FINGERPRINT_V2_LIKENESS_THRESHOLD = _env_float_floor("FINGERPRINT_V2_LIKENESS_THRESHOLD", 0.62, 0.62)
-FINGERPRINT_V2_MIN_COVERAGE = _env_float_floor("FINGERPRINT_V2_MIN_COVERAGE", 0.18, 0.18)
+FINGERPRINT_V2_LIKENESS_THRESHOLD = _env_float_floor("FINGERPRINT_V2_LIKENESS_THRESHOLD", 0.58, 0.58)
+FINGERPRINT_V2_MIN_COVERAGE = _env_float_floor("FINGERPRINT_V2_MIN_COVERAGE", 0.14, 0.14)
 FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY = _env_float_floor("FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY", 0.58, 0.58)
 FINGERPRINT_V2_MIN_KP_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_KP_COUNT", 35, 35)
 FINGERPRINT_V2_MIN_KP_SPREAD = _env_float_floor("FINGERPRINT_V2_MIN_KP_SPREAD", 0.12, 0.12)
-FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", 0.36, 0.36)
+FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", 0.28, 0.28)
 FINGERPRINT_V2_MAX_TILE_COVERAGE_STD = _env_float_ceil("FINGERPRINT_V2_MAX_TILE_COVERAGE_STD", 0.24, 0.24)
-FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT", 90, 90)
+FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT", 45, 45)
 FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO = _env_float_ceil("FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO", 0.32, 0.32)
 FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO", 0.20, 0.20)
 FINGERPRINT_V2_MIN_MEAN_PERIODICITY = _env_float_floor("FINGERPRINT_V2_MIN_MEAN_PERIODICITY", 4.5, 4.5)
-FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO", 0.20, 0.20)
+FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO", 0.12, 0.12)
 
 
 def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
@@ -115,14 +115,12 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     if ridge_block_ratio < FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO:
         reasons.append("low_ridge_block_ratio")
 
-    # Composite anti-diagram vetoes. These combinations are uncommon for real fingerprints
-    # but common for drawings/graphics with sparse global structures.
-    if coverage < 0.22 and edge_component_count < 120:
+    # Composite anti-diagram vetoes. Keep these strict for sparse, line-drawing patterns
+    # while avoiding false rejects on weak real captures.
+    if coverage < 0.10 and edge_component_count < 30:
         reasons.append("diagram_like_sparse_topology")
-    if entropy > 0.82 and largest_edge_component_ratio > 0.30:
-        reasons.append("diagram_like_entropy_component_pattern")
-    if periodic_tile_ratio > 0.80 and edge_component_count < 140:
-        reasons.append("diagram_like_periodic_sparse_edges")
+    if largest_edge_component_ratio > 0.45 and edge_component_count < 40:
+        reasons.append("diagram_like_dominant_stroke")
 
     return len(reasons) == 0, reasons
 
@@ -374,7 +372,7 @@ async def fingerprint_match_v2(request: Request):
         matched = best_score >= FINGERPRINT_V2_THRESHOLD
         tier = "auto" if matched else "reject_low_similarity"
         return {
-            "best_index": int(best_index) if matched else None,
+            "best_index": int(best_index),
             "score": float(best_score),
             "matched": bool(matched),
             "tier": tier,
