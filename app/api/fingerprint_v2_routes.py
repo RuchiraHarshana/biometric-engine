@@ -324,20 +324,22 @@ async def match_fingerprint_v2(
                 "matched": False,
                 "person_id": None,
                 "full_name": None,
-                "similarity": 0.0,
+                "similarity": max(0.0, global_best_score) if global_best_score != float("-inf") else 0.0,
                 "tier": "no_match",
             }
 
         matched = global_best_score >= global_threshold
-        rec = global_best_rec if matched else None
+        rec = global_best_rec
         person_id = rec.get("person_id") if rec else None
         person = pmap.get(person_id, {}) if person_id else {}
 
         return {
             "matched": matched,
-            "person_id": person_id,
-            "full_name": person.get("full_name") if person else None,
-            "similarity": global_best_score if matched else 0.0,
+            "person_id": person_id if matched else None,
+            "candidate_person_id": person_id,
+            "full_name": person.get("full_name") if (matched and person) else None,
+            "candidate_full_name": person.get("full_name") if person else None,
+            "similarity": max(0.0, global_best_score),
             "threshold": global_threshold,
             "quality_score": global_quality,
             "quality_threshold": global_quality_threshold,

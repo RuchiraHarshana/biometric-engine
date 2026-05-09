@@ -373,15 +373,22 @@ class FingerprintEngineV2:
             if num_good == 0:
                 return 0.0
 
+            # Reward descriptor agreement directly so same-finger partial captures
+            # are not over-penalized by a fragile global homography fit.
+            score_matches = float(min(1.0, num_good / 28.0))
+            mean_distance = float(np.mean([m.distance for m in good]))
+            score_distance = float(max(0.0, min(1.0, 1.0 - (mean_distance / 80.0))))
+
             if q_kps is not None and d_kps is not None and num_good >= 6:
                 pts_q = np.float32([q_kps[m.queryIdx] for m in good]).reshape(-1, 2)
                 pts_d = np.float32([d_kps[m.trainIdx] for m in good]).reshape(-1, 2)
                 _, mask = cv2.findHomography(pts_q, pts_d, cv2.RANSAC, 6.0)  # more tolerant RANSAC
                 inliers = int(np.sum(mask)) if mask is not None else 0
                 inlier_ratio = inliers / float(max(1, num_good))
-                score = 0.75 * inlier_ratio + 0.25 * min(1.0, num_good / 40.0)  # 40 good = full score
+                score = 0.45 * inlier_ratio + 0.35 * score_matches + 0.20 * score_distance
                 return float(max(0.0, min(1.0, score)))
 
-            return float(min(1.0, num_good / 40.0))
+            score = 0.70 * score_matches + 0.30 * score_distance
+            return float(max(0.0, min(1.0, score)))
         except Exception:
             return 0.0

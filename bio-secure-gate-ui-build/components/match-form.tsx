@@ -182,7 +182,23 @@ export function MatchForm() {
                 </Button>
               </div>
             ) : (
-              <span className="text-red-600 font-semibold">No match found.</span>
+              <div className="space-y-2">
+                <span className="text-red-600 font-semibold">No match found.</span>
+                {typeof result.similarity === "number" && (
+                  <div className="text-sm text-muted-foreground">
+                    Similarity: {result.similarity.toFixed(3)}
+                    {typeof result.threshold === "number" ? ` / threshold ${result.threshold.toFixed(3)}` : ""}
+                  </div>
+                )}
+                {result.candidate_full_name || result.candidate_person_id ? (
+                  <div className="text-sm text-muted-foreground">
+                    Closest candidate: {result.candidate_full_name || result.candidate_person_id}
+                  </div>
+                ) : null}
+                {result.tier ? (
+                  <div className="text-xs text-muted-foreground">Tier: {result.tier}</div>
+                ) : null}
+              </div>
             )}
           </AlertDescription>
         </Alert>
