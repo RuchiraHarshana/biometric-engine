@@ -39,6 +39,8 @@ FINGERPRINT_V2_MIN_COVERAGE = float(os.getenv("FINGERPRINT_V2_MIN_COVERAGE", "0.
 FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY = float(os.getenv("FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY", "0.58"))
 FINGERPRINT_V2_MIN_KP_COUNT = int(os.getenv("FINGERPRINT_V2_MIN_KP_COUNT", "35"))
 FINGERPRINT_V2_MIN_KP_SPREAD = float(os.getenv("FINGERPRINT_V2_MIN_KP_SPREAD", "0.12"))
+FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = float(os.getenv("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", "0.32"))
+FINGERPRINT_V2_MAX_TILE_COVERAGE_STD = float(os.getenv("FINGERPRINT_V2_MAX_TILE_COVERAGE_STD", "0.24"))
 
 
 def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
@@ -47,6 +49,8 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     entropy = float(likeness.get("orientation_entropy", 0.0))
     kp_count = int(likeness.get("kp_count", 0))
     kp_spread = float(likeness.get("kp_spread", 0.0))
+    tile_active_ratio = float(likeness.get("tile_active_ratio", 0.0))
+    tile_coverage_std = float(likeness.get("tile_coverage_std", 0.0))
 
     reasons = []
     if score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
@@ -59,6 +63,10 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
         reasons.append("low_keypoint_count")
     if kp_spread < FINGERPRINT_V2_MIN_KP_SPREAD:
         reasons.append("low_keypoint_spread")
+    if tile_active_ratio < FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO:
+        reasons.append("low_tile_active_ratio")
+    if tile_coverage_std > FINGERPRINT_V2_MAX_TILE_COVERAGE_STD:
+        reasons.append("high_tile_coverage_std")
 
     return len(reasons) == 0, reasons
 
@@ -196,6 +204,8 @@ async def fingerprint_template_v2(request: Request):
                 "min_orientation_entropy": FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY,
                 "min_kp_count": FINGERPRINT_V2_MIN_KP_COUNT,
                 "min_kp_spread": FINGERPRINT_V2_MIN_KP_SPREAD,
+                "min_tile_active_ratio": FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO,
+                "max_tile_coverage_std": FINGERPRINT_V2_MAX_TILE_COVERAGE_STD,
                 "reasons": like_reasons,
                 "likeness_components": likeness,
             }
@@ -256,6 +266,8 @@ async def fingerprint_match_v2(request: Request):
                 "min_orientation_entropy": FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY,
                 "min_kp_count": FINGERPRINT_V2_MIN_KP_COUNT,
                 "min_kp_spread": FINGERPRINT_V2_MIN_KP_SPREAD,
+                "min_tile_active_ratio": FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO,
+                "max_tile_coverage_std": FINGERPRINT_V2_MAX_TILE_COVERAGE_STD,
                 "reasons": like_reasons,
                 "likeness_components": likeness,
             }

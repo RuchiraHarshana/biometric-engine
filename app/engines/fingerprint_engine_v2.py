@@ -73,6 +73,8 @@ class FingerprintEngineV2:
                 "kp_count": 0,
                 "kp_density": 0.0,
                 "kp_spread": 0.0,
+                "tile_active_ratio": 0.0,
+                "tile_coverage_std": 0.0,
             }
 
         raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
@@ -85,6 +87,30 @@ class FingerprintEngineV2:
         informative = grad_mag > 12.0
         coverage = float(np.mean(informative))
         score_coverage = self._range_score(coverage, 0.12, 0.35)
+
+        # Spatial distribution check: fingerprints spread ridge texture over many regions,
+        # while drawings often occupy only a few tiles.
+        grid_n = 6
+        active_tiles = 0
+        tile_covs = []
+        for gy_i in range(grid_n):
+            y0 = int(gy_i * h / grid_n)
+            y1 = int((gy_i + 1) * h / grid_n)
+            for gx_i in range(grid_n):
+                x0 = int(gx_i * w / grid_n)
+                x1 = int((gx_i + 1) * w / grid_n)
+                tile = informative[y0:y1, x0:x1]
+                if tile.size == 0:
+                    tile_cov = 0.0
+                else:
+                    tile_cov = float(np.mean(tile))
+                tile_covs.append(tile_cov)
+                if tile_cov >= 0.08:
+                    active_tiles += 1
+        tile_active_ratio = float(active_tiles) / float(grid_n * grid_n)
+        tile_coverage_std = float(np.std(np.array(tile_covs, dtype=np.float32))) if tile_covs else 0.0
+        score_tile_active = self._range_score(tile_active_ratio, 0.28, 0.70)
+        score_tile_uniform = 1.0 - self._range_score(tile_coverage_std, 0.20, 0.45)
 
         # Fingerprints have varied local ridge directions (loops/whorls/arcs),
         # while simple drawings often have only a few dominant directions.
@@ -121,10 +147,12 @@ class FingerprintEngineV2:
         score_spread = self._range_score(kp_spread, 0.08, 0.22)
 
         score = (
-            0.40 * score_coverage
-            + 0.25 * score_entropy
-            + 0.20 * score_density
-            + 0.15 * score_spread
+            0.26 * score_coverage
+            + 0.22 * score_entropy
+            + 0.16 * score_density
+            + 0.12 * score_spread
+            + 0.16 * score_tile_active
+            + 0.08 * score_tile_uniform
         )
 
         return {
@@ -134,6 +162,8 @@ class FingerprintEngineV2:
             "kp_count": int(kp_count),
             "kp_density": float(kp_density),
             "kp_spread": float(kp_spread),
+            "tile_active_ratio": float(tile_active_ratio),
+            "tile_coverage_std": float(tile_coverage_std),
         }
 
     def quality_score(self, img: np.ndarray) -> float:
