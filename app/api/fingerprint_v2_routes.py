@@ -206,7 +206,7 @@ async def enroll_fingerprint_v2(
             "finger_label": finger_label,
             "template": template,
             "capture_method": capture_method,
-            "algorithm": "hybrid_v1",
+            "algorithm": "hybrid_v2",
             "quality_score": quality,
         }
 
@@ -292,7 +292,7 @@ async def match_fingerprint_v2(
                 "minutiae_count": analysis["minutiae_count"],
                 "reasons": ["low_likeness_score"],
                 "tier": "reject_non_fingerprint",
-                "algorithm": "hybrid_v1",
+                "algorithm": "hybrid_v2",
                 "finger_label": finger_label or None,
             }
 
@@ -307,7 +307,7 @@ async def match_fingerprint_v2(
                 "minutiae_count": analysis["minutiae_count"],
                 "reasons": ["low_quality_fingerprint_image"],
                 "tier": "reject_quality",
-                "algorithm": "hybrid_v1",
+                "algorithm": "hybrid_v2",
                 "finger_label": finger_label or None,
             }
 
@@ -316,8 +316,9 @@ async def match_fingerprint_v2(
 
         # Match query template against every stored template (rotation tolerance
         # is built into the minutiae matching algorithm — no multi-angle variants needed)
-        best_score = float("-inf")
-        best_rec   = None
+        best_score  = float("-inf")
+        best_rec    = None
+        stale_count = 0
         for r in template_records:
             raw_tpl = r.get("template")
             tpl = _deserialize_tpl(raw_tpl)
@@ -325,6 +326,10 @@ async def match_fingerprint_v2(
                 continue
             try:
                 s = _safe_float(_local_fp_v2.match_score(query_tpl, tpl), 0.0)
+            except ValueError as exc:
+                if str(exc).startswith("STALE_TEMPLATE:"):
+                    stale_count += 1
+                continue
             except Exception:
                 continue
             if s > best_score:
@@ -332,6 +337,20 @@ async def match_fingerprint_v2(
                 best_rec   = r
 
         if best_rec is None:
+            if stale_count > 0:
+                return {
+                    "matched": False,
+                    "person_id": None,
+                    "full_name": None,
+                    "similarity": 0.0,
+                    "tier": "stale_templates",
+                    "message": (
+                        f"{stale_count} stored template(s) were enrolled with the old engine "
+                        "(hybrid_v1) and are incompatible with the current engine (hybrid_v2). "
+                        "Please re-enroll all persons from the admin panel."
+                    ),
+                    "algorithm": "hybrid_v2",
+                }
             return {
                 "matched": False,
                 "person_id": None,
@@ -342,7 +361,7 @@ async def match_fingerprint_v2(
                 "likeness_score": like_score,
                 "threshold": threshold,
                 "tier": "no_match",
-                "algorithm": "hybrid_v1",
+                "algorithm": "hybrid_v2",
             }
 
         best_score = max(0.0, best_score)
@@ -364,7 +383,7 @@ async def match_fingerprint_v2(
             "likeness_threshold": likeness_threshold,
             "minutiae_count": analysis["minutiae_count"],
             "tier": "auto" if matched else "reject_low_similarity",
-            "algorithm": "hybrid_v1",
+            "algorithm": "hybrid_v2",
             "finger_label": best_rec.get("finger_label") or (finger_label or None),
         }
     except HTTPException:
