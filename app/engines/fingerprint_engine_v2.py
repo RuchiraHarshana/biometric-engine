@@ -75,6 +75,8 @@ class FingerprintEngineV2:
                 "kp_spread": 0.0,
                 "tile_active_ratio": 0.0,
                 "tile_coverage_std": 0.0,
+                "edge_component_count": 0,
+                "largest_edge_component_ratio": 1.0,
             }
 
         raw_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
@@ -146,13 +148,32 @@ class FingerprintEngineV2:
             kp_spread = 0.0
         score_spread = self._range_score(kp_spread, 0.08, 0.22)
 
+        # Connected-component structure on edge map.
+        # Fingerprints usually produce many distributed ridge fragments,
+        # while drawings have fewer components dominated by one/few strokes.
+        edges = cv2.Canny(proc, 45, 140)
+        bin_edges = (edges > 0).astype(np.uint8)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bin_edges, connectivity=8)
+        component_areas = []
+        for i in range(1, num_labels):
+            a = int(stats[i, cv2.CC_STAT_AREA])
+            if a >= 8:
+                component_areas.append(a)
+        edge_component_count = int(len(component_areas))
+        sum_area = float(sum(component_areas))
+        largest_ratio = (float(max(component_areas)) / sum_area) if sum_area > 0 else 1.0
+        score_components = self._range_score(float(edge_component_count), 45.0, 180.0)
+        score_largest_ratio = 1.0 - self._range_score(largest_ratio, 0.22, 0.65)
+
         score = (
-            0.26 * score_coverage
-            + 0.22 * score_entropy
-            + 0.16 * score_density
-            + 0.12 * score_spread
-            + 0.16 * score_tile_active
+            0.22 * score_coverage
+            + 0.18 * score_entropy
+            + 0.12 * score_density
+            + 0.10 * score_spread
+            + 0.14 * score_tile_active
             + 0.08 * score_tile_uniform
+            + 0.10 * score_components
+            + 0.06 * score_largest_ratio
         )
 
         return {
@@ -164,6 +185,8 @@ class FingerprintEngineV2:
             "kp_spread": float(kp_spread),
             "tile_active_ratio": float(tile_active_ratio),
             "tile_coverage_std": float(tile_coverage_std),
+            "edge_component_count": int(edge_component_count),
+            "largest_edge_component_ratio": float(largest_ratio),
         }
 
     def quality_score(self, img: np.ndarray) -> float:

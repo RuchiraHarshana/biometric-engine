@@ -68,6 +68,8 @@ FINGERPRINT_V2_MIN_KP_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_KP_COUNT", 35, 
 FINGERPRINT_V2_MIN_KP_SPREAD = _env_float_floor("FINGERPRINT_V2_MIN_KP_SPREAD", 0.12, 0.12)
 FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", 0.32, 0.32)
 FINGERPRINT_V2_MAX_TILE_COVERAGE_STD = _env_float_ceil("FINGERPRINT_V2_MAX_TILE_COVERAGE_STD", 0.24, 0.24)
+FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT", 55, 55)
+FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO = _env_float_ceil("FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO", 0.32, 0.32)
 
 
 def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
@@ -78,6 +80,8 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     kp_spread = float(likeness.get("kp_spread", 0.0))
     tile_active_ratio = float(likeness.get("tile_active_ratio", 0.0))
     tile_coverage_std = float(likeness.get("tile_coverage_std", 0.0))
+    edge_component_count = int(likeness.get("edge_component_count", 0))
+    largest_edge_component_ratio = float(likeness.get("largest_edge_component_ratio", 1.0))
 
     reasons = []
     if score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
@@ -94,6 +98,10 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
         reasons.append("low_tile_active_ratio")
     if tile_coverage_std > FINGERPRINT_V2_MAX_TILE_COVERAGE_STD:
         reasons.append("high_tile_coverage_std")
+    if edge_component_count < FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT:
+        reasons.append("low_edge_component_count")
+    if largest_edge_component_ratio > FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO:
+        reasons.append("high_largest_edge_component_ratio")
 
     return len(reasons) == 0, reasons
 
@@ -233,6 +241,8 @@ async def fingerprint_template_v2(request: Request):
                 "min_kp_spread": FINGERPRINT_V2_MIN_KP_SPREAD,
                 "min_tile_active_ratio": FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO,
                 "max_tile_coverage_std": FINGERPRINT_V2_MAX_TILE_COVERAGE_STD,
+                "min_edge_component_count": FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT,
+                "max_largest_edge_component_ratio": FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO,
                 "reasons": like_reasons,
                 "likeness_components": likeness,
             }
@@ -295,6 +305,8 @@ async def fingerprint_match_v2(request: Request):
                 "min_kp_spread": FINGERPRINT_V2_MIN_KP_SPREAD,
                 "min_tile_active_ratio": FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO,
                 "max_tile_coverage_std": FINGERPRINT_V2_MAX_TILE_COVERAGE_STD,
+                "min_edge_component_count": FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT,
+                "max_largest_edge_component_ratio": FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO,
                 "reasons": like_reasons,
                 "likeness_components": likeness,
             }
