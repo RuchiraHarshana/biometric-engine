@@ -61,15 +61,18 @@ def _env_float_ceil(name: str, default: float, ceil: float) -> float:
 FINGERPRINT_V2_THRESHOLD = float(os.getenv("FINGERPRINT_V2_THRESHOLD", "0.18"))
 FINGERPRINT_V2_QUALITY_THRESHOLD = _env_float_floor("FINGERPRINT_V2_QUALITY_THRESHOLD", 0.35, 0.35)
 FINGERPRINT_V2_FP_SCORE_THRESHOLD = float(os.getenv("FINGERPRINT_V2_FP_SCORE_THRESHOLD", "0.20"))
-FINGERPRINT_V2_LIKENESS_THRESHOLD = _env_float_floor("FINGERPRINT_V2_LIKENESS_THRESHOLD", 0.60, 0.60)
-FINGERPRINT_V2_MIN_COVERAGE = _env_float_floor("FINGERPRINT_V2_MIN_COVERAGE", 0.16, 0.16)
+FINGERPRINT_V2_LIKENESS_THRESHOLD = _env_float_floor("FINGERPRINT_V2_LIKENESS_THRESHOLD", 0.62, 0.62)
+FINGERPRINT_V2_MIN_COVERAGE = _env_float_floor("FINGERPRINT_V2_MIN_COVERAGE", 0.18, 0.18)
 FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY = _env_float_floor("FINGERPRINT_V2_MIN_ORIENTATION_ENTROPY", 0.58, 0.58)
 FINGERPRINT_V2_MIN_KP_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_KP_COUNT", 35, 35)
 FINGERPRINT_V2_MIN_KP_SPREAD = _env_float_floor("FINGERPRINT_V2_MIN_KP_SPREAD", 0.12, 0.12)
-FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", 0.32, 0.32)
+FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_TILE_ACTIVE_RATIO", 0.36, 0.36)
 FINGERPRINT_V2_MAX_TILE_COVERAGE_STD = _env_float_ceil("FINGERPRINT_V2_MAX_TILE_COVERAGE_STD", 0.24, 0.24)
-FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT", 55, 55)
+FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT = _env_int_floor("FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT", 90, 90)
 FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO = _env_float_ceil("FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO", 0.32, 0.32)
+FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO", 0.20, 0.20)
+FINGERPRINT_V2_MIN_MEAN_PERIODICITY = _env_float_floor("FINGERPRINT_V2_MIN_MEAN_PERIODICITY", 4.5, 4.5)
+FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO = _env_float_floor("FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO", 0.20, 0.20)
 
 
 def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
@@ -82,6 +85,9 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
     tile_coverage_std = float(likeness.get("tile_coverage_std", 0.0))
     edge_component_count = int(likeness.get("edge_component_count", 0))
     largest_edge_component_ratio = float(likeness.get("largest_edge_component_ratio", 1.0))
+    periodic_tile_ratio = float(likeness.get("periodic_tile_ratio", 0.0))
+    mean_periodicity = float(likeness.get("mean_periodicity", 0.0))
+    ridge_block_ratio = float(likeness.get("ridge_block_ratio", 0.0))
 
     reasons = []
     if score < FINGERPRINT_V2_LIKENESS_THRESHOLD:
@@ -102,6 +108,21 @@ def _v2_likeness_verdict(likeness: dict) -> tuple[bool, list[str]]:
         reasons.append("low_edge_component_count")
     if largest_edge_component_ratio > FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO:
         reasons.append("high_largest_edge_component_ratio")
+    if periodic_tile_ratio < FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO:
+        reasons.append("low_periodic_tile_ratio")
+    if mean_periodicity < FINGERPRINT_V2_MIN_MEAN_PERIODICITY:
+        reasons.append("low_mean_periodicity")
+    if ridge_block_ratio < FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO:
+        reasons.append("low_ridge_block_ratio")
+
+    # Composite anti-diagram vetoes. These combinations are uncommon for real fingerprints
+    # but common for drawings/graphics with sparse global structures.
+    if coverage < 0.22 and edge_component_count < 120:
+        reasons.append("diagram_like_sparse_topology")
+    if entropy > 0.82 and largest_edge_component_ratio > 0.30:
+        reasons.append("diagram_like_entropy_component_pattern")
+    if periodic_tile_ratio > 0.80 and edge_component_count < 140:
+        reasons.append("diagram_like_periodic_sparse_edges")
 
     return len(reasons) == 0, reasons
 
@@ -243,6 +264,9 @@ async def fingerprint_template_v2(request: Request):
                 "max_tile_coverage_std": FINGERPRINT_V2_MAX_TILE_COVERAGE_STD,
                 "min_edge_component_count": FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT,
                 "max_largest_edge_component_ratio": FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO,
+                "min_periodic_tile_ratio": FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO,
+                "min_mean_periodicity": FINGERPRINT_V2_MIN_MEAN_PERIODICITY,
+                "min_ridge_block_ratio": FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO,
                 "reasons": like_reasons,
                 "likeness_components": likeness,
             }
@@ -307,6 +331,9 @@ async def fingerprint_match_v2(request: Request):
                 "max_tile_coverage_std": FINGERPRINT_V2_MAX_TILE_COVERAGE_STD,
                 "min_edge_component_count": FINGERPRINT_V2_MIN_EDGE_COMPONENT_COUNT,
                 "max_largest_edge_component_ratio": FINGERPRINT_V2_MAX_LARGEST_EDGE_COMPONENT_RATIO,
+                "min_periodic_tile_ratio": FINGERPRINT_V2_MIN_PERIODIC_TILE_RATIO,
+                "min_mean_periodicity": FINGERPRINT_V2_MIN_MEAN_PERIODICITY,
+                "min_ridge_block_ratio": FINGERPRINT_V2_MIN_RIDGE_BLOCK_RATIO,
                 "reasons": like_reasons,
                 "likeness_components": likeness,
             }
