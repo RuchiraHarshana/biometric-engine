@@ -16,8 +16,17 @@ from app.schemas.biometric import EnrollResponse, MatchResponse
 from app.schemas.biometric import PersonUpdate
 from app.schemas.verify import VerifyResponse
 
-from app.core.config import SIMILARITY_THRESHOLD, FINGERPRINT_THRESHOLD, MODEL_SERVICE_URL, MODEL_SERVICE_TIMEOUT
+from app.core.config import (
+    SIMILARITY_THRESHOLD,
+    FINGERPRINT_THRESHOLD,
+    FINGERPRINT_V2_THRESHOLD,
+    FINGERPRINT_V2_LIKENESS_THRESHOLD,
+    FINGERPRINT_V2_QUALITY_THRESHOLD,
+    MODEL_SERVICE_URL,
+    MODEL_SERVICE_TIMEOUT,
+)
 from app.auth.dependencies import require_admin, require_register_access, require_verify_access, require_officer
+from app.engines.fingerprint_engine_v2 import FingerprintEngineV2
 
 # ✅ Import fingerprint router
 from app.api.fingerprint_routes import router_fp
@@ -25,6 +34,7 @@ from app.api.fingerprint_v2_routes import router_fp_v2
 
 
 router = APIRouter()
+_fp_v2_engine = FingerprintEngineV2()
 
 
 def _sanitize_similarity(sim: float) -> float:
@@ -33,6 +43,19 @@ def _sanitize_similarity(sim: float) -> float:
         return v if v >= 0.01 else 0.0
     except Exception:
         return 0.0
+
+
+def _deserialize_tpl(tpl) -> dict | None:
+    if isinstance(tpl, str):
+        try:
+            tpl = json.loads(tpl)
+        except Exception:
+            return None
+    if not isinstance(tpl, dict):
+        return None
+    if "minutiae" not in tpl and "des" not in tpl:
+        return None
+    return tpl
 
 
 async def _post_model_service(path: str, files=None, data=None) -> dict:
@@ -330,24 +353,6 @@ async def verify(
     persons = await sb.get("persons")
     pmap = {p.get("person_id"): p for p in persons}
 
-    if not embeddings:
-        return VerifyResponse(
-            face_provided=face_image is not None,
-            fingerprint_provided=fingerprint_image is not None,
-            face_matched=None,
-            face_person_id=None,
-            face_full_name=None,
-            face_similarity=None,
-            face_threshold=float(SIMILARITY_THRESHOLD),
-            fingerprint_matched=None,
-            fingerprint_person_id=None,
-            fingerprint_full_name=None,
-            fingerprint_similarity=None,
-            fingerprint_threshold=float(FINGERPRINT_THRESHOLD),
-            access_granted=False,
-            decision_rule="no_enrollments_in_db",
-        )
-
     face_matched = None
     face_person_id = None
     face_full_name = None
@@ -385,53 +390,50 @@ async def verify(
 
     # ---------- FINGERPRINT ----------
     if fingerprint_image is not None:
-        # Build templates from enrolled fingerprint templates table
-        tpl_rows = await sb.get("fingerprint_templates")
-        templates = []
-        template_records = []
-        for r in tpl_rows:
-            tpl_obj = r.get("template")
-            if not tpl_obj:
-                continue
-            templates.append(tpl_obj)
-            template_records.append(r)
+        # Combined verify should use the same fingerprint path as standalone match:
+        # local v2 engine + fingerprint_templates_v2 table.
+        tpl_rows = await sb.get("fingerprint_templates_v2")
+        template_records = [r for r in tpl_rows if r.get("template")]
 
-        if templates:
+        if template_records:
             fp_bytes = await fingerprint_image.read()
-            files = {
-                "image": (
-                    fingerprint_image.filename or "fingerprint.jpg",
-                    fp_bytes,
-                    fingerprint_image.content_type or "application/octet-stream",
-                )
-            }
-            data = {"templates": json.dumps(templates)}
-            payload = await _post_model_service("/fingerprint/match", files=files, data=data)
+            if fp_bytes:
+                img = _fp_v2_engine.read_image(fp_bytes)
+                analysis = _fp_v2_engine.analyze(img)
 
-            # log payload for debugging combined-verify issues
-            try:
-                import os as _os, json as _json, datetime as _dt
-                d = _os.path.join(_os.path.dirname(__file__), '..', 'logs')
-                _os.makedirs(d, exist_ok=True)
-                p = _os.path.join(d, 'combined_match_requests.log')
-                with open(p, 'a', encoding='utf-8') as fh:
-                    fh.write(_json.dumps({'ts': _dt.datetime.utcnow().isoformat() + 'Z', 'payload': payload}) + '\n')
-            except Exception:
-                pass
+                like_score = float(analysis.get("likeness", 0.0))
+                quality = float(analysis.get("quality", 0.0))
+                query_tpl = analysis.get("template")
 
-            best_index = payload.get("best_index")
-            best_score = float(payload.get("score", 0.0))
+                if (
+                    query_tpl
+                    and like_score >= float(FINGERPRINT_V2_LIKENESS_THRESHOLD)
+                    and quality >= float(FINGERPRINT_V2_QUALITY_THRESHOLD)
+                ):
+                    best_score = float("-inf")
+                    best_rec = None
+                    for r in template_records:
+                        tpl = _deserialize_tpl(r.get("template"))
+                        if tpl is None:
+                            continue
+                        try:
+                            score = float(_fp_v2_engine.match_score(query_tpl, tpl))
+                        except Exception:
+                            continue
+                        if score > best_score:
+                            best_score = score
+                            best_rec = r
 
-            fp_similarity = best_score
-            # enforce runtime minimum threshold (safety)
-            EFFECTIVE_FINGERPRINT_THRESHOLD = max(FINGERPRINT_THRESHOLD, 0.85)
-            fp_matched = (best_index is not None) and (best_score >= EFFECTIVE_FINGERPRINT_THRESHOLD)
-
-            if fp_matched:
-                best = template_records[int(best_index)]
-                fp_person_id = best.get("person_id")
-                fp_full_name = pmap.get(fp_person_id, {}).get("full_name")
-                fp_criminal_records = pmap.get(fp_person_id, {}).get("criminal_records")
+                    if best_rec is not None:
+                        fp_similarity = max(0.0, best_score)
+                        fp_matched = fp_similarity >= float(FINGERPRINT_V2_THRESHOLD)
+                        if fp_matched:
+                            fp_person_id = best_rec.get("person_id")
+                            fp_full_name = pmap.get(fp_person_id, {}).get("full_name")
+                            fp_criminal_records = pmap.get(fp_person_id, {}).get("criminal_records")
+                else:
+                    fp_similarity = 0.0
+                    fp_matched = False
 
     face_provided = face_image is not None
     fp_provided = fingerprint_image is not None
@@ -468,7 +470,7 @@ async def verify(
         fingerprint_person_id=fp_person_id,
         fingerprint_full_name=fp_full_name,
         fingerprint_similarity=fp_similarity,
-        fingerprint_threshold=float(FINGERPRINT_THRESHOLD),
+        fingerprint_threshold=float(FINGERPRINT_V2_THRESHOLD),
         fingerprint_criminal_records=locals().get('fp_criminal_records', None),
         cross_modal_mismatch=locals().get('cross_modal_mismatch', False),
         mismatch_message=locals().get('mismatch_message', None),
